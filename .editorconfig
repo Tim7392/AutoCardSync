@@ -1,0 +1,124 @@
+# Top-most EditorConfig file
+root = true
+
+# All files
+[*]
+end_of_line = crlf
+trim_trailing_whitespace = true
+insert_final_newline = true
+charset = utf-8
+indent_style = space
+indent_size = 4
+
+# C# files
+[*.cs]
+charset = utf-8-bom
+
+# C# code style: prefer var
+dotnet_style_predefined_type_for_locals_parameters_members = true:suggestion
+dotnet_style_predefined_type_for_member_access = true:suggestion
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = true:suggestion
+
+# C# code style: expression-bodied members
+csharp_style_expression_bodied_methods = when_on_single_line:suggestion
+csharp_style_expression_bodied_constructors = false:suggestion
+csharp_style_expression_bodied_operators = when_on_single_line:suggestion
+csharp_style_expression_bodied_properties = true:suggestion
+csharp_style_expression_bodied_accessors = true:suggestion
+csharp_style_expression_bodied_lambdas = true:suggestion
+csharp_style_expression_bodied_local_functions = false:suggestion
+
+# C# code style: pattern matching
+csharp_style_pattern_matching_over_is_with_cast_check = true:suggestion
+csharp_style_pattern_matching_over_as_with_null_check = true:suggestion
+csharp_style_prefer_switch_expression = true:suggestion
+csharp_style_prefer_pattern_matching = true:suggestion
+csharp_style_prefer_not_pattern = true:suggestion
+
+# C# code style: null-checking preferences
+csharp_style_throw_expression = true:suggestion
+csharp_style_conditional_delegate_call = true:suggestion
+csharp_prefer_simple_default_expression = true:suggestion
+
+# C# code style: unused value preferences
+csharp_style_unused_value_expression_statement_preference = discard_variable:suggestion
+csharp_style_unused_value_assignment_preference = discard_variable:suggestion
+
+# C# formatting
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_indent_case_contents = true
+csharp_indent_switch_labels = true
+csharp_space_after_cast = false
+csharp_space_after_keywords_in_control_flow_statements = true
+csharp_space_between_method_declaration_parameter_list_parentheses = false
+csharp_space_between_method_call_parameter_list_parentheses = false
+csharp_preserve_single_line_blocks = true
+csharp_preserve_single_line_statements = false
+
+# .NET naming rules
+
+## Interface naming: I prefix
+dotnet_naming_rule.interface_naming.symbols = interface_symbols
+dotnet_naming_rule.interface_naming.style = interface_style
+dotnet_naming_rule.interface_naming.severity = suggestion
+
+dotnet_naming_symbols.interface_symbols.applicable_kinds = interface
+dotnet_naming_symbols.interface_symbols.applicable_accessibilities = *
+
+dotnet_naming_style.interface_style.required_prefix = I
+dotnet_naming_style.interface_style.capitalization = pascal_case
+
+## Async method naming: Async suffix
+dotnet_naming_rule.async_naming.symbols = async_symbols
+dotnet_naming_rule.async_naming.style = async_style
+dotnet_naming_rule.async_naming.severity = suggestion
+
+dotnet_naming_symbols.async_symbols.applicable_kinds = method
+dotnet_naming_symbols.async_symbols.required_modifiers = async
+
+dotnet_naming_style.async_style.required_suffix = Async
+dotnet_naming_style.async_style.capitalization = pascal_case
+
+## Private/internal field naming: _camelCase
+dotnet_naming_rule.private_field_naming.symbols = private_field_symbols
+dotnet_naming_rule.private_field_naming.style = private_field_style
+dotnet_naming_rule.private_field_naming.severity = suggestion
+
+dotnet_naming_symbols.private_field_symbols.applicable_kinds = field
+dotnet_naming_symbols.private_field_symbols.applicable_accessibilities = private, internal, private_protected
+
+dotnet_naming_style.private_field_style.required_prefix = _
+dotnet_naming_style.private_field_style.capitalization = camel_case
+
+## Constants: PascalCase
+dotnet_naming_rule.constant_naming.symbols = constant_symbols
+dotnet_naming_rule.constant_naming.style = constant_style
+dotnet_naming_rule.constant_naming.severity = suggestion
+
+dotnet_naming_symbols.constant_symbols.applicable_kinds = field, local
+dotnet_naming_symbols.constant_symbols.required_modifiers = const
+
+dotnet_naming_style.constant_style.capitalization = pascal_case
+
+## Types: PascalCase
+dotnet_naming_rule.type_naming.symbols = type_symbols
+dotnet_naming_rule.type_naming.style = type_style
+dotnet_naming_rule.type_naming.severity = suggestion
+
+dotnet_naming_symbols.type_symbols.applicable_kinds = class, struct, enum, delegate
+dotnet_naming_symbols.type_symbols.applicable_accessibilities = *
+
+dotnet_naming_style.type_style.capitalization = pascal_case
+
+[src/AutoCardSync.Installer/*.wxs]
+generated_code = true
+indent_style = space
+indent_size = 2
+charset = ascii
+end_of_line = crlf
+trim_trailing_whitespace = true

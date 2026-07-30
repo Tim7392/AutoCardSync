@@ -1,0 +1,17 @@
+{
+    "schemaVersion":  1,
+    "channel":  "Evergreen Standalone",
+    "architecture":  "x64",
+    "retrievedAtUtc":  "2026-07-30T07:30:47.3422187+00:00",
+    "downloadUrl":  "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/f3274495-ff02-440e-b522-2d4129a911e8/MicrosoftEdgeWebView2RuntimeInstallerX64.exe",
+    "sourceAliasUrl":  "https://go.microsoft.com/fwlink/?linkid=2124701",
+    "metadataUrl":  "https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution",
+    "fileName":  "MicrosoftEdgeWebView2RuntimeInstallerX64-standalone.exe",
+    "size":  203778256,
+    "sha256":  "04B9F08D839C8C06F34A85ACEA0D9F1568D3D8AA309A77619AAA46BB29ADE0F8",
+    "sha512":  "D7A4EED123E50FDB36F3DCE5E14FCE0345CDA78609B2C21D24EF6EFAF5189D62658FA2E2A4BDD2F8EA021C493029D51A0DF7BB846D601EACE04802B15837AFA9",
+    "installerProductVersion":  "1.3.251.5",
+    "expectedSignerSubjectContains":  "Microsoft Corporation",
+    "signerCertificateThumbprint":  "4028CAD637509D4744B17EC5B42AED8D7A31E6AF",
+    "distributionPolicy":  "Embedded offline Evergreen Standalone installer pinned to the resolved Microsoft artifact URL; no web bootstrapper and no install-time download. Refresh this provenance intentionally for future WebView2 servicing releases."
+}

@@ -1,0 +1,46 @@
+/*
+ * AutoCardSync design tokens
+ * --------------------------
+ * Edit this file first when changing colors, radii, shadows or motion timing.
+ * Component CSS consumes these variables; avoid scattering raw values elsewhere.
+ */
+:root{
+  --ink:#17181b;
+  --ink-2:#4f525a;
+  --ink-3:#777b85;
+  --line:rgba(25,29,38,.10);
+  --line-strong:rgba(25,29,38,.16);
+  --paper:#f6f7fb;
+  --paper-solid:#fff;
+  --paper-soft:rgba(255,255,255,.74);
+  --blue:#087cff;
+  --blue-2:#0068df;
+  --blue-soft:#eaf4ff;
+  --green:#1b8f4f;
+  --green-soft:#eaf8ef;
+  --orange:#c95b08;
+  --orange-soft:#fff1e4;
+  --red:#d42b3d;
+  --red-soft:#fff0f2;
+  --glass:rgba(255,255,255,.52);
+  --glass-strong:rgba(255,255,255,.72);
+  --glass-clear:rgba(255,255,255,.28);
+  --glass-border:rgba(255,255,255,.74);
+  --glass-shadow:0 24px 72px rgba(41,55,88,.16),0 2px 12px rgba(36,45,64,.08);
+  --shadow-soft:0 12px 34px rgba(40,55,85,.10);
+  --r-xl:30px;
+  --r-lg:24px;
+  --r-md:18px;
+  --r-sm:13px;
+  --ease-spring:cubic-bezier(.18,.89,.32,1.12);
+  --ease-soft:cubic-bezier(.22,1,.36,1);
+  --ease-ui:cubic-bezier(.2,.72,.2,1);
+  --mx:50%;
+  --my:20%;
+}
+
+:root{
+  /* Screen transition variables are also synchronized by scripts/config.js. */
+  --screen-in-duration:620ms;
+  --screen-out-duration:300ms;
+}

@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:netfx="http://wixtoolset.org/schemas/v4/wxs/netfx"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Bundle Name="$(var.BundleName)"
+          Manufacturer="AutoCardSync Team"
+          Version="$(var.ProductVersion)"
+          UpgradeCode="$(var.BundleUpgradeCode)"
+          IconSourceFile="$(var.IconSourceFile)"
+          bal:CommandLineVariables="caseInsensitive">
+    <Log Prefix="AutoCardSync_Setup" Extension="log" />
+    <bal:Condition Message="AutoCardSync 仅支持 Windows 10/11 64 位。"
+                   Condition="VersionNT64 &gt;= v10.0 AND NTProductType = 1" />
+    <bal:Condition Message="AutoCardSync 仅支持 x64 (AMD64) 电脑。"
+                   Condition="NativeMachine = 34404" />
+    <Variable Name="CreateDesktopShortcut"
+              Type="numeric"
+              Value="$(var.CreateDesktopShortcutDefault)"
+              Persisted="yes"
+              bal:Overridable="yes" />
+
+    <netfx:DotNetCoreSearch Id="DotNetDesktopRuntime10Search"
+                            Variable="DotNetDesktopRuntime10Version"
+                            RuntimeType="desktop"
+                            Platform="x64"
+                            MajorVersion="10" />
+
+    <util:RegistrySearch Id="WebView2RuntimeMachineSearch"
+                         Root="HKLM"
+                         Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                         Value="pv"
+                         Variable="WebView2RuntimeMachineVersion"
+                         Result="value"
+                         Bitness="always32" />
+    <util:RegistrySearch Id="WebView2RuntimeUserSearch"
+                         Root="HKCU"
+                         Key="SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+                         Value="pv"
+                         Variable="WebView2RuntimeUserVersion"
+                         Result="value"
+                         Bitness="always32" />
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense"
+                                               LicenseUrl=""
+                                               SuppressOptionsUI="yes"
+                                               LaunchTarget="$(var.LaunchTarget)"
+                                               LaunchWorkingFolder="$(var.LaunchWorkingFolder)" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <ExePackage Id="DotNetDesktopRuntime10x64"
+                  SourceFile="$(var.RuntimeInstallerPath)"
+                  Name="windowsdesktop-runtime-10.0.10-win-x64.exe"
+                  DisplayName="Microsoft Windows Desktop Runtime 10.0.10 (x64)"
+                  Description="Microsoft Windows Desktop Runtime 10.0.10 (x64)"
+                  PerMachine="yes"
+                  DetectCondition="DotNetDesktopRuntime10Version &gt;= v10.0.10"
+                  InstallCondition="NOT (DotNetDesktopRuntime10Version &gt;= v10.0.10)"
+                  InstallArguments="/install /quiet /norestart"
+                  RepairArguments="/repair /quiet /norestart"
+                  Permanent="yes"
+                  Vital="yes"
+                  Compressed="yes"
+                  Cache="remove"
+                  LogPathVariable="AutoCardSyncDotNetRuntimeLog">
+        <ExitCode Value="0" Behavior="success" />
+        <ExitCode Value="1641" Behavior="forceReboot" />
+        <ExitCode Value="3010" Behavior="scheduleReboot" />
+        <ExitCode Behavior="error" />
+      </ExePackage>
+      <ExePackage Id="WebView2RuntimeX64"
+                  SourceFile="$(var.WebView2RuntimeInstallerPath)"
+                  Name="MicrosoftEdgeWebView2RuntimeInstallerX64-standalone.exe"
+                  DisplayName="Microsoft Edge WebView2 Runtime (x64, offline)"
+                  Description="Microsoft Edge WebView2 Evergreen Runtime (x64 offline installer)"
+                  PerMachine="yes"
+                  DetectCondition="WebView2RuntimeMachineVersion OR WebView2RuntimeUserVersion"
+                  InstallCondition="NOT (WebView2RuntimeMachineVersion OR WebView2RuntimeUserVersion)"
+                  InstallArguments="/silent /install"
+                  Permanent="yes"
+                  Vital="yes"
+                  Compressed="yes"
+                  Cache="remove"
+                  LogPathVariable="AutoCardSyncWebView2RuntimeLog">
+        <ExitCode Value="0" Behavior="success" />
+        <ExitCode Value="1641" Behavior="forceReboot" />
+        <ExitCode Value="3010" Behavior="scheduleReboot" />
+        <ExitCode Behavior="error" />
+      </ExePackage>
+      <MsiPackage Id="AutoCardSyncMsi"
+                  SourceFile="$(var.MsiPath)"
+                  Name="$(var.MsiPackageName)"
+                  Permanent="no"
+                  Compressed="yes"
+                  Visible="no"
+                  Vital="yes"
+                  Cache="keep"
+                  LogPathVariable="AutoCardSyncMsiLog">
+        <MsiProperty Name="CREATE_DESKTOP_SHORTCUT" Value="[CreateDesktopShortcut]" />
+      </MsiPackage>
+    </Chain>
+  </Bundle>
+</Wix>

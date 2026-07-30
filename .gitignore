@@ -1,0 +1,35 @@
+.vs/
+bin/
+obj/
+TestResults/
+artifacts/
+*.user
+.idea/
+
+# Machine-local settings and secrets. Commit redacted examples only.
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+*.cer
+*.crt
+secrets/
+.secrets/
+local.settings.json
+appsettings.Local.json
+appsettings.Development.json
+
+# Generated diagnostics and real-media samples must stay out of the public repository.
+*.trx
+*.coverage
+*.coveragexml
+*.mp4
+*.mov
+*.mxf
+*.raw
+*.r3d
+*.braw
+*.ari

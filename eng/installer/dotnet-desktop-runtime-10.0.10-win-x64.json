@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "product": "Microsoft Windows Desktop Runtime",
+  "version": "10.0.10",
+  "releaseDate": "2026-07-14",
+  "architecture": "x64",
+  "rid": "win-x64",
+  "metadataUrl": "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json",
+  "downloadUrl": "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/10.0.10/windowsdesktop-runtime-10.0.10-win-x64.exe",
+  "fileName": "windowsdesktop-runtime-10.0.10-win-x64.exe",
+  "size": 60053808,
+  "sha512": "A5502261C25BA163F35BCA7D50611C195E78B8797B16C5BBF2203FBDFFF92C0275D36838A3200C08443D2D23A2F6A867C58093D5C239A60DD798A6596DF4DC13",
+  "expectedSignerSubjectContains": "O=Microsoft Corporation"
+}

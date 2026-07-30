@@ -1,0 +1,28 @@
+<Project Sdk="WixToolset.Sdk/4.0.6">
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.0.0.0</ProductVersion>
+    <SetupVersion Condition="'$(SetupVersion)' == ''">1.0.0</SetupVersion>
+    <BundleName Condition="'$(BundleName)' == ''">AutoCardSync Setup</BundleName>
+    <BundleUpgradeCode Condition="'$(BundleUpgradeCode)' == ''">{8F329F7C-4C06-418C-A0D2-02974880A2A4}</BundleUpgradeCode>
+    <MsiPackageName Condition="'$(MsiPackageName)' == ''">AutoCardSync.msi</MsiPackageName>
+    <LaunchTarget Condition="'$(LaunchTarget)' == ''">[ProgramFiles64Folder]AutoCardSync\bin\Tray\AutoCardSync.Agent.Tray.exe</LaunchTarget>
+    <LaunchWorkingFolder Condition="'$(LaunchWorkingFolder)' == ''">[ProgramFiles64Folder]AutoCardSync\bin\Tray</LaunchWorkingFolder>
+    <CreateDesktopShortcutDefault Condition="'$(CreateDesktopShortcutDefault)' == ''">1</CreateDesktopShortcutDefault>
+    <IconSourceFile Condition="'$(IconSourceFile)' == ''">$(MSBuildThisFileDirectory)..\AutoCardSync.Standalone\Assets\AutoCardSync.ico</IconSourceFile>
+    <OutputName>AutoCardSync-Setup-$(SetupVersion)</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <MsiPath Condition="'$(MsiPath)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\AutoCardSync.msi</MsiPath>
+    <RuntimeInstallerPath Condition="'$(RuntimeInstallerPath)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\prerequisites\windowsdesktop-runtime-10.0.10-win-x64.exe</RuntimeInstallerPath>
+    <WebView2RuntimeInstallerPath Condition="'$(WebView2RuntimeInstallerPath)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\prerequisites\MicrosoftEdgeWebView2RuntimeInstallerX64-standalone.exe</WebView2RuntimeInstallerPath>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);SetupVersion=$(SetupVersion);MsiPath=$(MsiPath);RuntimeInstallerPath=$(RuntimeInstallerPath);WebView2RuntimeInstallerPath=$(WebView2RuntimeInstallerPath);BundleName=$(BundleName);BundleUpgradeCode=$(BundleUpgradeCode);MsiPackageName=$(MsiPackageName);LaunchTarget=$(LaunchTarget);LaunchWorkingFolder=$(LaunchWorkingFolder);CreateDesktopShortcutDefault=$(CreateDesktopShortcutDefault);IconSourceFile=$(IconSourceFile)</DefineConstants>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.Bal.wixext" Version="4.0.6" />
+    <PackageReference Include="WixToolset.Netfx.wixext" Version="4.0.6" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="4.0.6" />
+  </ItemGroup>
+</Project>

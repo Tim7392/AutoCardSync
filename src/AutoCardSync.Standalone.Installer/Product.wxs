@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="AutoCardSync"
+           Manufacturer="AutoCardSync Team"
+           Version="$(var.ProductVersion)"
+           UpgradeCode="{B982E51A-D334-45B2-9D7E-64FCB9B0AF19}"
+           InstallerVersion="500"
+           Compressed="yes"
+           Scope="perUser"
+           Codepage="65001">
+    <SummaryInformation Description="AutoCardSync V1 Standalone" Manufacturer="AutoCardSync Team" />
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of AutoCardSync is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AutoCardSync.ico" SourceFile="$(var.IconSourceFile)" />
+    <Property Id="ARPPRODUCTICON" Value="AutoCardSync.ico" />
+    <Property Id="CREATE_DESKTOP_SHORTCUT" Value="1" Secure="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="LocalProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="AutoCardSync" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="DesktopFolder" />
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="AutoCardSync" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="StandaloneShortcuts" Directory="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcutComp" Guid="{1DF80C47-0AB0-41DF-A854-937E3B0D8C19}">
+        <Shortcut Id="StartMenuShortcut"
+                  Name="AutoCardSync"
+                  Description="打开 AutoCardSync"
+                  Target="[INSTALLFOLDER]AutoCardSync.Standalone.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AutoCardSync.ico"
+                  IconIndex="0" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\AutoCardSync\Standalone"
+                       Name="Installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <ComponentGroup Id="StandaloneDesktopShortcut" Directory="DesktopFolder">
+      <Component Id="DesktopShortcutComp"
+                 Guid="{F6CB2E40-7102-44EB-B751-7E0D09B4E2A0}"
+                 Condition="CREATE_DESKTOP_SHORTCUT = 1">
+        <Shortcut Id="DesktopShortcut"
+                  Name="AutoCardSync"
+                  Description="打开 AutoCardSync"
+                  Target="[INSTALLFOLDER]AutoCardSync.Standalone.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="AutoCardSync.ico"
+                  IconIndex="0" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\AutoCardSync\Standalone"
+                       Name="DesktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+
+
+    <CustomAction Id="ReconcileAutoStart"
+                  FileRef="fil_7403977D5127658C"
+                  ExeCommand="--reconcile-autostart"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="check" />
+    <CustomAction Id="RemoveAutoStart"
+                  FileRef="fil_7403977D5127658C"
+                  ExeCommand="--remove-autostart"
+                  Execute="deferred"
+                  Impersonate="yes"
+                  Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="ReconcileAutoStart" After="InstallFiles"
+              Condition="NOT (REMOVE ~= &quot;ALL&quot;)" />
+      <Custom Action="RemoveAutoStart" Before="RemoveFiles"
+              Condition="REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+
+    <Feature Id="StandaloneFeature" Title="AutoCardSync" Level="1">
+      <ComponentGroupRef Id="StandaloneFiles" />
+      <ComponentGroupRef Id="StandaloneShortcuts" />
+      <ComponentGroupRef Id="StandaloneDesktopShortcut" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_Minimal" />
+  </Package>
+</Wix>

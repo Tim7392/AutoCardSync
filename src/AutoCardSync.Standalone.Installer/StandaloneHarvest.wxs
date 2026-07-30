@@ -1,0 +1,262 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="cmp_A7790E94F3CC2E23" Guid="{DC3E4F49-05C4-D681-81DF-8A9059990EC7}">
+        <File Id="fil_F966E33EC047B03A" Name="AutoCardSync.Domain.dll" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Domain.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_A7790E94F3CC2E23" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_CE015A3F01F82CF3" Guid="{869B779C-46D1-489B-DBFA-3509EDDD597C}">
+        <File Id="fil_BC41549BF60A8075" Name="AutoCardSync.Domain.pdb" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Domain.pdb" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_CE015A3F01F82CF3" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_9B00E9F0F077F2B2" Guid="{0DD4B7A7-3B8A-41E6-698F-6086474281AD}">
+        <File Id="fil_65FA4B28AA93C89F" Name="AutoCardSync.Standalone.Core.dll" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Standalone.Core.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_9B00E9F0F077F2B2" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_6E3BECDD30D0F77E" Guid="{C35183E7-8049-049B-1509-13965A26474A}">
+        <File Id="fil_B1E45D5234BAAA83" Name="AutoCardSync.Standalone.Core.pdb" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Standalone.Core.pdb" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_6E3BECDD30D0F77E" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_2649AE2E09CDC9D0" Guid="{51BDC0DE-1AEB-7B4F-8201-7B779E5583AB}">
+        <File Id="fil_E30892AAEEA4DD92" Name="AutoCardSync.Standalone.deps.json" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Standalone.deps.json" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_2649AE2E09CDC9D0" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_16D492425FC3E870" Guid="{2156A9B2-76E7-D398-A2BC-DEB4F449899F}">
+        <File Id="fil_ED3D259A5DB55823" Name="AutoCardSync.Standalone.dll" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Standalone.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_16D492425FC3E870" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_412D241E3ABF8814" Guid="{180D62F2-394D-99E4-5CC2-F8963A8D90A7}">
+        <File Id="fil_7403977D5127658C" Name="AutoCardSync.Standalone.exe" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Standalone.exe" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_412D241E3ABF8814" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_1A3A87F79221E26B" Guid="{5552560A-468B-EA69-8D26-69B12477A306}">
+        <File Id="fil_FFDB7B7575302AC9" Name="AutoCardSync.Standalone.pdb" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Standalone.pdb" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_1A3A87F79221E26B" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_ABCB96B72E982EA5" Guid="{61D4E77F-1153-F534-F2D1-3B3E57FE2075}">
+        <File Id="fil_E7AF098F7B33DB0C" Name="AutoCardSync.Standalone.runtimeconfig.json" Source="..\..\artifacts\publish\Standalone\AutoCardSync.Standalone.runtimeconfig.json" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_ABCB96B72E982EA5" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_ABEFD2593BA85B74" Guid="{09106927-1C4B-A0DC-37CB-A6AE277C1984}">
+        <File Id="fil_BD12414D4F4BEA74" Name="Microsoft.Extensions.Configuration.Abstractions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.Abstractions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_ABEFD2593BA85B74" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_72737F21BB7DDF8F" Guid="{6D43AAF9-7CB9-D8FE-1522-956AC018AF0F}">
+        <File Id="fil_978722071FB1F013" Name="Microsoft.Extensions.Configuration.Binder.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.Binder.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_72737F21BB7DDF8F" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_A05C6D49737E5331" Guid="{CB59EEF8-5F43-490A-F1A4-F61631753918}">
+        <File Id="fil_E806BD25EFC9E361" Name="Microsoft.Extensions.Configuration.CommandLine.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.CommandLine.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_A05C6D49737E5331" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_ABF2C35B4EA71E8A" Guid="{7E0F9E45-8F53-4939-EA2A-6C8CCEED9017}">
+        <File Id="fil_105CE0971BBEB114" Name="Microsoft.Extensions.Configuration.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_ABF2C35B4EA71E8A" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_8C583774B9D55FBC" Guid="{5695996D-48DD-DB8A-BE06-94BB7A45D814}">
+        <File Id="fil_8E52B7EED6E9BD6F" Name="Microsoft.Extensions.Configuration.EnvironmentVariables.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.EnvironmentVariables.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_8C583774B9D55FBC" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_A6D2C6AF8619783C" Guid="{7C0A027B-C6B9-8256-0D75-55F3989A11B0}">
+        <File Id="fil_6CA313FEAA2F0A72" Name="Microsoft.Extensions.Configuration.FileExtensions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.FileExtensions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_A6D2C6AF8619783C" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_7BD159F4B6F61938" Guid="{5DC3172C-F506-295A-3863-E875D0865653}">
+        <File Id="fil_DABB0A608A8E6765" Name="Microsoft.Extensions.Configuration.Json.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.Json.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_7BD159F4B6F61938" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_770B666DD3B9C54F" Guid="{4774E4EA-8084-0CE9-7DF7-9B794CF8C568}">
+        <File Id="fil_41A1424A35756CB2" Name="Microsoft.Extensions.Configuration.UserSecrets.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Configuration.UserSecrets.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_770B666DD3B9C54F" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_884CAB7329DD2C57" Guid="{2137AF5D-6949-D69C-309C-3675998C2C6A}">
+        <File Id="fil_CE978240DE6C2750" Name="Microsoft.Extensions.DependencyInjection.Abstractions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.DependencyInjection.Abstractions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_884CAB7329DD2C57" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_CC4406F4BD9C5457" Guid="{A19E6BFF-A72C-C165-DD56-0EC67B0B06A6}">
+        <File Id="fil_D5F5FC8D22E5F733" Name="Microsoft.Extensions.DependencyInjection.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.DependencyInjection.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_CC4406F4BD9C5457" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_AC3A9B419C84FB4B" Guid="{9EDFF71D-A517-E83F-4CB0-4CAE5DBCA48B}">
+        <File Id="fil_741DF13AA23F9B6D" Name="Microsoft.Extensions.Diagnostics.Abstractions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Diagnostics.Abstractions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_AC3A9B419C84FB4B" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_19B19057DF1D2CB9" Guid="{723DD986-F7E9-B768-1976-7829DDB858D9}">
+        <File Id="fil_7672894B346AABDA" Name="Microsoft.Extensions.Diagnostics.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Diagnostics.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_19B19057DF1D2CB9" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_1A67D73D92F8C66D" Guid="{920F856D-7DF3-2D2F-48D9-32AE7CB7CC26}">
+        <File Id="fil_D6BB4B48345E4E47" Name="Microsoft.Extensions.FileProviders.Abstractions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.FileProviders.Abstractions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_1A67D73D92F8C66D" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_0EBC368BA1B0207A" Guid="{299C87F0-8E8A-943E-7740-6E13BED53FCC}">
+        <File Id="fil_8D9D3403744B9307" Name="Microsoft.Extensions.FileProviders.Physical.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.FileProviders.Physical.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_0EBC368BA1B0207A" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_D424DC4F8165C957" Guid="{CC1F2C6A-5A1C-02F6-47F3-3857099E8B0D}">
+        <File Id="fil_FFE7FF509B7DA569" Name="Microsoft.Extensions.FileSystemGlobbing.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.FileSystemGlobbing.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_D424DC4F8165C957" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_2BBC602821C0959E" Guid="{813686F4-6588-B4DC-EFA1-8676D4504232}">
+        <File Id="fil_F3EE86AEB9C17B11" Name="Microsoft.Extensions.Hosting.Abstractions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Hosting.Abstractions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_2BBC602821C0959E" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_A3332C85A44AA0E0" Guid="{C9BD7C5C-7B82-A680-43CC-D8F6B9536B6F}">
+        <File Id="fil_D2A4327F2C4E67D2" Name="Microsoft.Extensions.Hosting.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Hosting.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_A3332C85A44AA0E0" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_D7CA470723A2F6F2" Guid="{1F989BF7-C1C7-4065-021C-FEA39263C176}">
+        <File Id="fil_E259784F1D9A8DFC" Name="Microsoft.Extensions.Logging.Abstractions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Logging.Abstractions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_D7CA470723A2F6F2" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_52162D8B496B519E" Guid="{272DC862-D102-8095-9D90-36FEC9460651}">
+        <File Id="fil_9C8DBA7A2EA2DDEF" Name="Microsoft.Extensions.Logging.Configuration.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Logging.Configuration.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_52162D8B496B519E" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_3A2245E15F700890" Guid="{69ECD13C-2185-54E9-0B6F-535936B06B61}">
+        <File Id="fil_A1543B567C55AEE0" Name="Microsoft.Extensions.Logging.Console.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Logging.Console.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_3A2245E15F700890" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_6F8A1AABD14E3471" Guid="{9E3FA4A5-1726-B5FA-6796-77821533A12F}">
+        <File Id="fil_A331D00DC2FEDC27" Name="Microsoft.Extensions.Logging.Debug.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Logging.Debug.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_6F8A1AABD14E3471" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_43FA986DD31125DC" Guid="{539C3CBA-FC66-41AF-CD27-C0F17C2C90FB}">
+        <File Id="fil_9D0B30C166329A43" Name="Microsoft.Extensions.Logging.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Logging.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_43FA986DD31125DC" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_89A9C99831622156" Guid="{A3545BDC-CC2B-2B8A-9AD9-76A8E135D78C}">
+        <File Id="fil_37417E58E1042C18" Name="Microsoft.Extensions.Logging.EventLog.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Logging.EventLog.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_89A9C99831622156" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_B84EEF050C421FD1" Guid="{1A41150B-5F87-F3A9-3060-D11CB9216FBF}">
+        <File Id="fil_98AA7C22C80F6BF5" Name="Microsoft.Extensions.Logging.EventSource.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Logging.EventSource.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_B84EEF050C421FD1" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_D17DE262C43338DD" Guid="{10BF60DE-1A8E-9418-8B68-B700BC8D136E}">
+        <File Id="fil_EFC2EBB3C173270B" Name="Microsoft.Extensions.Options.ConfigurationExtensions.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Options.ConfigurationExtensions.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_D17DE262C43338DD" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_A8DA723C0A004D8E" Guid="{D6909F03-62F3-1569-6A98-56F223D55414}">
+        <File Id="fil_4478F55E91C7995E" Name="Microsoft.Extensions.Options.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Options.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_A8DA723C0A004D8E" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_377C94601758E33D" Guid="{ADD530AF-5844-0306-8099-015BA265EBF8}">
+        <File Id="fil_6EF3E15AE469AD58" Name="Microsoft.Extensions.Primitives.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Extensions.Primitives.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_377C94601758E33D" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_0A8D4B5ED354E4C0" Guid="{39DD8D5A-6FE9-259F-D731-0E23977E966D}">
+        <File Id="fil_1E397B558012F767" Name="Microsoft.Web.WebView2.Core.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Web.WebView2.Core.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_0A8D4B5ED354E4C0" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_9CD53AA8C2CCD3D4" Guid="{35620B92-2349-7B97-915A-9C54DD0D9C74}">
+        <File Id="fil_8022876C9A58F938" Name="Microsoft.Web.WebView2.Core.xml" Source="..\..\artifacts\publish\Standalone\Microsoft.Web.WebView2.Core.xml" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_9CD53AA8C2CCD3D4" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_94F09AB3A24E86BD" Guid="{8D2369EB-215C-E149-9BBD-648AAA7E07A1}">
+        <File Id="fil_8558074AD03E84B8" Name="Microsoft.Web.WebView2.WinForms.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Web.WebView2.WinForms.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_94F09AB3A24E86BD" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_7E7E2C92330ACFE7" Guid="{E985BAEA-2E4C-0A01-F720-29B3992763A5}">
+        <File Id="fil_DD07272AD344CA5B" Name="Microsoft.Web.WebView2.WinForms.xml" Source="..\..\artifacts\publish\Standalone\Microsoft.Web.WebView2.WinForms.xml" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_7E7E2C92330ACFE7" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_319F0CE874B241B0" Guid="{F742FB97-3355-DAA0-1B54-85F1DAB0AD05}">
+        <File Id="fil_45A1F679C7764473" Name="Microsoft.Web.WebView2.Wpf.dll" Source="..\..\artifacts\publish\Standalone\Microsoft.Web.WebView2.Wpf.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_319F0CE874B241B0" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_2F4905E182714A9C" Guid="{9DB6D9ED-5E02-D0EB-D586-AB1CDF579C4D}">
+        <File Id="fil_5621CCFDAF6475FF" Name="Microsoft.Web.WebView2.Wpf.xml" Source="..\..\artifacts\publish\Standalone\Microsoft.Web.WebView2.Wpf.xml" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_2F4905E182714A9C" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_C220DDCC01153CD1" Guid="{D995EA17-9EC3-8EDF-9F59-9A4B25DEB1C1}">
+        <File Id="fil_9EEAC2FA172BFE30" Name="System.Management.dll" Source="..\..\artifacts\publish\Standalone\System.Management.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_C220DDCC01153CD1" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Component Id="cmp_71DA5935BC29C5C7" Guid="{8080E359-C50C-10F6-DDEC-AE5B405FC104}">
+        <File Id="fil_7D42E9F486BAB923" Name="WebView2Loader.dll" Source="..\..\artifacts\publish\Standalone\WebView2Loader.dll" />
+        <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_71DA5935BC29C5C7" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+      <Directory Id="dir_B822399090333E21" Name="WebUI">
+        <Component Id="cmp_D7F2FFB026626E1D" Guid="{DBF9C49B-13C1-0F3A-A422-10D45FD7C09C}">
+          <File Id="fil_A19D34AFAB561C6B" Name="index.html" Source="..\..\artifacts\publish\Standalone\WebUI\index.html" />
+          <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_D7F2FFB026626E1D" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+        <Directory Id="dir_8CADA1256C1A6D95" Name="scripts">
+          <Component Id="cmp_CF9AF52D6766C934" Guid="{31031F30-5B6B-A272-B41D-8F70776111A0}">
+            <File Id="fil_79A7F60E823FD457" Name="app.js" Source="..\..\artifacts\publish\Standalone\WebUI\scripts\app.js" />
+            <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_CF9AF52D6766C934" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+        </Directory>
+        <Directory Id="dir_217BE863AED14865" Name="styles">
+          <Component Id="cmp_02DF3CB8E63A9E05" Guid="{1C31375C-A5F9-37D4-41B3-ACA1C1181335}">
+            <File Id="fil_96CE5B3E87FE5DD0" Name="app.css" Source="..\..\artifacts\publish\Standalone\WebUI\styles\app.css" />
+            <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_02DF3CB8E63A9E05" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp_242DB245E735B518" Guid="{F5CD18BA-5352-47BE-2BB6-83DD7843C4CD}">
+            <File Id="fil_F23D91BF8B0D6C1B" Name="product.css" Source="..\..\artifacts\publish\Standalone\WebUI\styles\product.css" />
+            <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_242DB245E735B518" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp_33906C83FA566EF3" Guid="{21CB3B37-1FF0-A442-D847-124C484E7BD7}">
+            <File Id="fil_5979CF4A13EB93B6" Name="tokens.css" Source="..\..\artifacts\publish\Standalone\WebUI\styles\tokens.css" />
+            <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_33906C83FA566EF3" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </DirectoryRef>
+  </Fragment>
+  <Fragment>
+    <ComponentGroup Id="StandaloneFiles">
+      <ComponentRef Id="cmp_A7790E94F3CC2E23" />
+      <ComponentRef Id="cmp_CE015A3F01F82CF3" />
+      <ComponentRef Id="cmp_9B00E9F0F077F2B2" />
+      <ComponentRef Id="cmp_6E3BECDD30D0F77E" />
+      <ComponentRef Id="cmp_2649AE2E09CDC9D0" />
+      <ComponentRef Id="cmp_16D492425FC3E870" />
+      <ComponentRef Id="cmp_412D241E3ABF8814" />
+      <ComponentRef Id="cmp_1A3A87F79221E26B" />
+      <ComponentRef Id="cmp_ABCB96B72E982EA5" />
+      <ComponentRef Id="cmp_ABEFD2593BA85B74" />
+      <ComponentRef Id="cmp_72737F21BB7DDF8F" />
+      <ComponentRef Id="cmp_A05C6D49737E5331" />
+      <ComponentRef Id="cmp_ABF2C35B4EA71E8A" />
+      <ComponentRef Id="cmp_8C583774B9D55FBC" />
+      <ComponentRef Id="cmp_A6D2C6AF8619783C" />
+      <ComponentRef Id="cmp_7BD159F4B6F61938" />
+      <ComponentRef Id="cmp_770B666DD3B9C54F" />
+      <ComponentRef Id="cmp_884CAB7329DD2C57" />
+      <ComponentRef Id="cmp_CC4406F4BD9C5457" />
+      <ComponentRef Id="cmp_AC3A9B419C84FB4B" />
+      <ComponentRef Id="cmp_19B19057DF1D2CB9" />
+      <ComponentRef Id="cmp_1A67D73D92F8C66D" />
+      <ComponentRef Id="cmp_0EBC368BA1B0207A" />
+      <ComponentRef Id="cmp_D424DC4F8165C957" />
+      <ComponentRef Id="cmp_2BBC602821C0959E" />
+      <ComponentRef Id="cmp_A3332C85A44AA0E0" />
+      <ComponentRef Id="cmp_D7CA470723A2F6F2" />
+      <ComponentRef Id="cmp_52162D8B496B519E" />
+      <ComponentRef Id="cmp_3A2245E15F700890" />
+      <ComponentRef Id="cmp_6F8A1AABD14E3471" />
+      <ComponentRef Id="cmp_43FA986DD31125DC" />
+      <ComponentRef Id="cmp_89A9C99831622156" />
+      <ComponentRef Id="cmp_B84EEF050C421FD1" />
+      <ComponentRef Id="cmp_D17DE262C43338DD" />
+      <ComponentRef Id="cmp_A8DA723C0A004D8E" />
+      <ComponentRef Id="cmp_377C94601758E33D" />
+      <ComponentRef Id="cmp_0A8D4B5ED354E4C0" />
+      <ComponentRef Id="cmp_9CD53AA8C2CCD3D4" />
+      <ComponentRef Id="cmp_94F09AB3A24E86BD" />
+      <ComponentRef Id="cmp_7E7E2C92330ACFE7" />
+      <ComponentRef Id="cmp_319F0CE874B241B0" />
+      <ComponentRef Id="cmp_2F4905E182714A9C" />
+      <ComponentRef Id="cmp_C220DDCC01153CD1" />
+      <ComponentRef Id="cmp_71DA5935BC29C5C7" />
+      <ComponentRef Id="cmp_D7F2FFB026626E1D" />
+      <ComponentRef Id="cmp_CF9AF52D6766C934" />
+      <ComponentRef Id="cmp_02DF3CB8E63A9E05" />
+      <ComponentRef Id="cmp_242DB245E735B518" />
+      <ComponentRef Id="cmp_33906C83FA566EF3" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

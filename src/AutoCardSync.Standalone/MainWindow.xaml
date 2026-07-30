@@ -1,0 +1,73 @@
+<Window x:Class="AutoCardSync.Standalone.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="AutoCardSync"
+        Icon="Assets/AutoCardSync.ico"
+        Width="1440" Height="900"
+        MinWidth="1100" MinHeight="700"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        Background="#DFE7F7"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        KeyboardNavigation.TabNavigation="Cycle"
+        AllowDrop="False"
+        KeyDown="OnWindowKeyDown">
+    <shell:WindowChrome.WindowChrome>
+        <shell:WindowChrome CaptionHeight="0"
+                            ResizeBorderThickness="8"
+                            CornerRadius="28"
+                            GlassFrameThickness="0"
+                            UseAeroCaptionButtons="False" />
+    </shell:WindowChrome.WindowChrome>
+    <Grid>
+        <wv2:WebView2 x:Name="WebView"
+                      AllowDrop="False"
+                      Focusable="True"
+                      Visibility="Hidden" />
+        <Border x:Name="FallbackPanel"
+                Margin="28"
+                CornerRadius="30"
+                Background="#F4F7FC"
+                BorderBrush="#FFFFFF"
+                BorderThickness="1">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        MaxWidth="620">
+                <Border Width="58" Height="58" CornerRadius="16" Background="#087CFF" HorizontalAlignment="Center">
+                    <TextBlock Text="A" Foreground="White" FontSize="30" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock x:Name="FallbackTitle"
+                           Text="AutoCardSync 正在启动"
+                           Margin="0,24,0,8"
+                           FontSize="28" FontWeight="SemiBold"
+                           Foreground="#1C2434"
+                           TextAlignment="Center" />
+                <TextBlock x:Name="FallbackMessage"
+                           Text="正在初始化本地界面…"
+                           FontSize="14"
+                           Foreground="#5E687C"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           AutomationProperties.Name="AutoCardSync UI startup status"
+                           AutomationProperties.LiveSetting="Assertive" />
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,24,0,0">
+                    <Button x:Name="FallbackRepairButton"
+                            Content="备份并重建本地界面"
+                            Visibility="Collapsed"
+                            Margin="0,0,12,0"
+                            Padding="24,10"
+                            Click="OnFallbackRepairClick"
+                            AutomationProperties.Name="备份损坏的本地界面缓存并重启 AutoCardSync" />
+                    <Button Content="关闭到托盘"
+                            Padding="24,10"
+                            Click="OnFallbackCloseClick"
+                            AutomationProperties.Name="关闭 AutoCardSync 窗口到托盘" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

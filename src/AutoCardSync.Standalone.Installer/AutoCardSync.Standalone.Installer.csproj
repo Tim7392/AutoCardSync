@@ -1,0 +1,16 @@
+<Project Sdk="WixToolset.Sdk/4.0.6">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <OutputType>Package</OutputType>
+    <OutputName>AutoCardSync-Standalone</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.0.0.0</ProductVersion>
+    <IconSourceFile Condition="'$(IconSourceFile)' == ''">$(MSBuildThisFileDirectory)..\AutoCardSync.Standalone\Assets\AutoCardSync.ico</IconSourceFile>
+    <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);IconSourceFile=$(IconSourceFile)</DefineConstants>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <SuppressIces>ICE43;ICE60;ICE61;ICE64;ICE71;ICE91</SuppressIces>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="4.0.6" />
+  </ItemGroup>
+</Project>
