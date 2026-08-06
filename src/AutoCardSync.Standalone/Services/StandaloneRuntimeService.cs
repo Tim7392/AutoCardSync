@@ -68,7 +68,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
     private bool _stateRepairInProgress;
     private bool _currentVolumeBlocked;
     private long _lastPublishedProgressSequence;
-    private StandaloneTargetMode _activeTargetMode = StandaloneTargetMode.LocalAndNas;
+    private StandaloneTransferStatusSnapshot? _lastTransferStatusSnapshot;
+    private StandaloneTargetMode? _activeTargetMode;
 
     public StandaloneRuntimeService(
         StandaloneConfigurationService configurationService,
@@ -101,6 +102,59 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
     {
         lock (_gate)
             return CreateMediaStatusSnapshotNoLock();
+    }
+
+    public async Task<IReadOnlyList<StandaloneImportHistoryItemDto>> GetImportHistoryAsync(
+        CancellationToken cancellationToken)
+    {
+        var configuredCardNames = new Dictionary<Guid, string>();
+        try
+        {
+            StandaloneConfiguration? configuration = await _configurationStore.LoadAsync(cancellationToken);
+            foreach (StandaloneCardProfile? profile in configuration?.CardProfiles ?? [])
+            {
+                if (profile is not null && profile.CardInstanceId != Guid.Empty &&
+                    !string.IsNullOrWhiteSpace(profile.DisplayName))
+                {
+                    configuredCardNames[profile.CardInstanceId] = profile.DisplayName;
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException or JsonException)
+        {
+            _logger.LogWarning(
+                exception,
+                "history.card_name_lookup_unavailable ErrorType={ErrorType}.",
+                exception.GetType().Name);
+        }
+
+        var baselineCardIds = new HashSet<Guid>();
+        try
+        {
+            var baselineStore = new StandaloneInventoryBaselineStore(_paths.CardInventoryBaselineFile);
+            foreach (StandaloneInventoryBaseline baseline in await baselineStore.FindAllBaselinesAsync(cancellationToken))
+                baselineCardIds.Add(baseline.CardInstanceId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException or JsonException)
+        {
+            _logger.LogWarning(
+                exception,
+                "history.baseline_name_lookup_unavailable ErrorType={ErrorType}.",
+                exception.GetType().Name);
+        }
+
+        return await new StandaloneImportHistoryReader(_paths, _logger).ReadAsync(
+            configuredCardNames, baselineCardIds, cancellationToken);
     }
 
     public void EnsureConfigurationChangeAllowed()
@@ -254,13 +308,28 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             "已重新读取配置、素材卡基线和持久化任务证据。"));
     }
 
-    public async Task<StandaloneRuntimeOperationResult> RetryAsync(CancellationToken cancellationToken)
+    public Task<StandaloneRuntimeOperationResult> RetryAsync(CancellationToken cancellationToken) =>
+        RetryAsyncCore(expectedMountSessionId: null, cancellationToken);
+
+    public Task<StandaloneRuntimeOperationResult> RetryMountedVolumeAsync(
+        string expectedMountSessionId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedMountSessionId);
+        return RetryAsyncCore(expectedMountSessionId, cancellationToken);
+    }
+
+    private async Task<StandaloneRuntimeOperationResult> RetryAsyncCore(
+        string? expectedMountSessionId,
+        CancellationToken cancellationToken)
     {
         VolumeEventArgs? volume;
         lock (_gate)
-            volume = _lastArrivedVolume;
+            volume = ResolveMountedVolumeForActionNoLock(expectedMountSessionId);
         if (volume is null)
-            return new(GetStatusSnapshot(), "当前没有可重新检查的素材卡。");
+            return new(GetStatusSnapshot(), expectedMountSessionId is null
+                ? "当前没有可重新检查的素材卡。"
+                : "这张素材卡已移除或状态已变化，请重新读取后再操作。");
 
         Task? reevaluation = TryStartTransfer(volume, forceReevaluation: true);
         if (reevaluation is null)
@@ -272,7 +341,22 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             "已完成持久化状态重新评估。"));
     }
 
-    public async Task<StandaloneRuntimeOperationResult> RestartFreshAsync(
+    public Task<StandaloneRuntimeOperationResult> RestartFreshAsync(
+        bool confirmed,
+        CancellationToken cancellationToken) =>
+        RestartFreshAsyncCore(expectedMountSessionId: null, confirmed, cancellationToken);
+
+    public Task<StandaloneRuntimeOperationResult> RestartFreshMountedVolumeAsync(
+        string expectedMountSessionId,
+        bool confirmed,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedMountSessionId);
+        return RestartFreshAsyncCore(expectedMountSessionId, confirmed, cancellationToken);
+    }
+
+    private async Task<StandaloneRuntimeOperationResult> RestartFreshAsyncCore(
+        string? expectedMountSessionId,
         bool confirmed,
         CancellationToken cancellationToken)
     {
@@ -286,12 +370,14 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 return new(_status, "当前任务仍在处理中，不能停用正在使用的任务记录。");
             if (_configurationChangeInProgress || _stateRepairInProgress)
                 return new(_status, "另一项设置或素材卡恢复操作仍在进行，请稍后重试。");
-            volume = _lastArrivedVolume;
+            volume = ResolveMountedVolumeForActionNoLock(expectedMountSessionId);
             if (volume is not null)
                 _stateRepairInProgress = true;
         }
         if (volume is null)
-            return new(GetStatusSnapshot(), "当前没有可重新开始的素材卡。");
+            return new(GetStatusSnapshot(), expectedMountSessionId is null
+                ? "当前没有可重新开始的素材卡。"
+                : "这张素材卡已移除或状态已变化，未更改任何任务记录。");
 
         bool handedOffToTransfer = false;
         try
@@ -381,10 +467,12 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         catch (Exception exception) when (
             exception is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
         {
+            _logger.LogWarning(exception, "restart_fresh.failed ErrorType={ErrorType}.", exception.GetType().Name);
             object failed = FailureStatus(
                 "重新开始任务未完成",
-                exception.Message,
-                canRestartFresh: true);
+                UserFacingFailureMessage(exception),
+                canRestartFresh: true,
+                guidance: ClassifyFailure(exception));
             SetTerminalStatus(failed);
             return new(failed, "未能完成旧任务停用与重新检查；旧记录仍保留。");
         }
@@ -403,8 +491,51 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             managedCardInstanceId: null,
             managedCameraTemplateId: null,
             expectedManagedVolumeKey: null,
+            expectedMountSessionId: null,
             waitForTransferCompletion: true,
+            softwareInitialization: false,
             cancellationToken);
+
+    public Task<StandaloneRuntimeOperationResult> ReinitializeMountedCardAsync(
+        string expectedMountSessionId,
+        bool confirmed,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedMountSessionId);
+        return ReinitializeCurrentCardAsync(
+            confirmed,
+            managedCardInstanceId: null,
+            managedCameraTemplateId: null,
+            expectedManagedVolumeKey: null,
+            expectedMountSessionId,
+            waitForTransferCompletion: true,
+            softwareInitialization: false,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Registers the currently mounted card in software without formatting or writing to the card.
+    /// Existing metadata is recorded as the initial baseline and is not copied.
+    /// </summary>
+    public Task<StandaloneRuntimeOperationResult> InitializeMountedCardAsync(
+        string mountSessionId,
+        Guid cameraTemplateId,
+        bool confirmed,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mountSessionId);
+        if (cameraTemplateId == Guid.Empty)
+            throw new ArgumentException("Camera template identity is required.", nameof(cameraTemplateId));
+        return ReinitializeCurrentCardAsync(
+            confirmed,
+            managedCardInstanceId: null,
+            managedCameraTemplateId: cameraTemplateId,
+            expectedManagedVolumeKey: null,
+            expectedMountSessionId: mountSessionId,
+            waitForTransferCompletion: false,
+            softwareInitialization: true,
+            cancellationToken);
+    }
 
     public Task<StandaloneRuntimeOperationResult> ReinitializeManagedCardAsync(
         Guid cardInstanceId,
@@ -423,11 +554,28 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             cardInstanceId,
             cameraTemplateId,
             expectedVolumeKey,
+            expectedMountSessionId: null,
             waitForTransferCompletion: false,
+            softwareInitialization: false,
             cancellationToken);
     }
 
-    public async Task<StandaloneRuntimeOperationResult> ConfirmSourceCleanupAsync(
+    public Task<StandaloneRuntimeOperationResult> ConfirmSourceCleanupAsync(
+        bool confirmed,
+        CancellationToken cancellationToken) =>
+        ConfirmSourceCleanupAsyncCore(expectedMountSessionId: null, confirmed, cancellationToken);
+
+    public Task<StandaloneRuntimeOperationResult> ConfirmMountedSourceCleanupAsync(
+        string expectedMountSessionId,
+        bool confirmed,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedMountSessionId);
+        return ConfirmSourceCleanupAsyncCore(expectedMountSessionId, confirmed, cancellationToken);
+    }
+
+    private async Task<StandaloneRuntimeOperationResult> ConfirmSourceCleanupAsyncCore(
+        string? expectedMountSessionId,
         bool confirmed,
         CancellationToken cancellationToken)
     {
@@ -442,7 +590,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 return new(_status, "当前任务仍在处理中，不能确认素材清理。");
             if (_configurationChangeInProgress || _stateRepairInProgress)
                 return new(_status, "另一项设置或素材卡恢复操作仍在进行，请稍后重试。");
-            volume = _lastArrivedVolume;
+            volume = ResolveMountedVolumeForActionNoLock(expectedMountSessionId);
             if (volume is not null)
             {
                 volumeKey = VolumeKey(volume);
@@ -454,7 +602,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
         }
         if (volume is null || volumeKey is null)
-            return new(GetStatusSnapshot(), "当前没有可确认清理的素材卡。");
+            return new(GetStatusSnapshot(), expectedMountSessionId is null
+                ? "当前没有可确认清理的素材卡。"
+                : "这张素材卡已移除或状态已变化，未接受任何清理差异。");
 
         bool handedOffToTransfer = false;
         try
@@ -492,7 +642,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         Guid? managedCardInstanceId,
         Guid? managedCameraTemplateId,
         string? expectedManagedVolumeKey,
+        string? expectedMountSessionId,
         bool waitForTransferCompletion,
+        bool softwareInitialization,
         CancellationToken cancellationToken)
     {
         if (!confirmed)
@@ -508,7 +660,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 return new(_status, "另一项设置或素材卡恢复操作仍在进行，请稍后重试。");
             volume = managedRebind && !string.IsNullOrWhiteSpace(expectedManagedVolumeKey)
                 ? _knownVolumes.GetValueOrDefault(expectedManagedVolumeKey)
-                : _lastArrivedVolume;
+                : ResolveMountedVolumeForActionNoLock(expectedMountSessionId);
             if (managedRebind && volume is null)
             {
                 throw new InvalidOperationException(
@@ -518,7 +670,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 _stateRepairInProgress = true;
         }
         if (volume is null)
-            return new(GetStatusSnapshot(), "当前没有可重新初始化的素材卡。");
+            return new(GetStatusSnapshot(), expectedMountSessionId is null
+                ? "当前没有可重新初始化的素材卡。"
+                : "这张素材卡已移除或状态已变化，未更改卡片身份或素材范围。");
 
         bool reinitializationAuthorized = false;
         bool currentVolumeResolved = false;
@@ -527,7 +681,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         try
         {
             StandaloneConfiguration? configuration = await _configurationStore.LoadAsync(cancellationToken);
-            if (configuration is null || !configuration.Validate().IsValid)
+            if (configuration is null)
+                throw new InvalidDataException("首次设置未完成，不能初始化素材卡。");
+            if (!softwareInitialization && !configuration.Validate().IsValid)
                 throw new InvalidDataException("首次设置未完成，不能重新初始化素材卡。");
             configuration = configuration.NormalizeForCurrentSchema();
             if (managedRebind)
@@ -540,10 +696,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
 
             string sourceRoot = Path.GetFullPath(volume.DriveLetter);
-            EnsureNoOverlap(
-                sourceRoot,
-                configuration.TargetMode.RequiresLocal() ? configuration.LocalTargetPath : null,
-                configuration.TargetMode.RequiresNas() ? configuration.NasMappedTargetPath : null);
+            if (!softwareInitialization)
+            {
+                EnsureNoOverlap(
+                    sourceRoot,
+                    configuration.TargetMode.RequiresLocal() ? configuration.LocalTargetPath : null,
+                    configuration.TargetMode.RequiresNas() ? configuration.NasMappedTargetPath : null);
+            }
 
             var faultDomains = new FaultDomainResolver();
             FaultDomainInfo sourceDomain = faultDomains.ResolveLocalDomain(sourceRoot);
@@ -566,7 +725,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 ? await taskCatalog.FindResumeCandidateByCardInstanceIdAsync(
                     historicalCardId, cancellationToken)
                 : null;
-            if (crossReaderResume is not null)
+            if (!softwareInitialization && crossReaderResume is not null)
             {
                 object blocked = FailureStatus(
                     "仍有未完成任务",
@@ -577,6 +736,31 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
 
             string volumeKey = VolumeKey(volume);
+            if (softwareInitialization)
+            {
+                var abandonedStore = new StandaloneAbandonedTaskStore(_paths.AbandonedTasksFile);
+                while (await taskCatalog.FindResumeCandidateAsync(sourceDomain.StorageIdentity!, cancellationToken)
+                    is StandaloneTaskJournal candidate)
+                {
+                    await abandonedStore.AbandonAsync(
+                        candidate.TaskId,
+                        candidate.SourceIdentity,
+                        "user_confirmed_software_initialization",
+                        cancellationToken);
+                }
+                if (suspectedHistoricalCardId is Guid softwareInitCardId)
+                {
+                    while (await taskCatalog.FindResumeCandidateByCardInstanceIdAsync(softwareInitCardId, cancellationToken)
+                        is StandaloneTaskJournal candidate)
+                    {
+                        await abandonedStore.AbandonAsync(
+                            candidate.TaskId,
+                            candidate.SourceIdentity,
+                            "user_confirmed_software_initialization",
+                            cancellationToken);
+                    }
+                }
+            }
             lock (_gate)
             {
                 reinitializationAuthorized = string.Equals(
@@ -588,7 +772,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                         sourceDomain.StorageIdentity,
                         StringComparison.Ordinal);
             }
-            if (!managedRebind && !reinitializationAuthorized)
+            if (!softwareInitialization && !managedRebind && !reinitializationAuthorized)
             {
                 return new(
                     GetStatusSnapshot(),
@@ -655,13 +839,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     StandaloneCardIdentityResolver.HasStrongExpectedContinuity(
                         value.InitializationEvidence, observed))
                 .ToArray();
-            if (managedRebind && matchingPending.Any(value =>
+            if (!softwareInitialization && managedRebind && matchingPending.Any(value =>
                     value.CardInstanceId != managedCardInstanceId!.Value))
             {
                 throw new InvalidDataException(
                     "当前插入介质与另一项未完成的素材卡初始化事务连续。系统拒绝把它绑定到你选择的历史卡；请先恢复或隔离那项初始化事务。");
             }
-            if (matchingPending.Length > 1)
+            if (!softwareInitialization && matchingPending.Length > 1)
             {
                 throw new InvalidDataException(
                     "当前介质同时匹配多个未完成的初始化事务。系统没有覆盖或放弃其中任何一项；请保留状态文件并逐项恢复。");
@@ -735,13 +919,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
 
             Guid[] distinctCommittedCardIds = matchingCommittedCards.Distinct().ToArray();
-            if (managedRebind && distinctCommittedCardIds.Any(cardId =>
+            if (!softwareInitialization && managedRebind && distinctCommittedCardIds.Any(cardId =>
                     cardId != managedCardInstanceId!.Value))
             {
                 throw new InvalidDataException(
                     "当前插入介质已被可靠识别为另一张已初始化素材卡。系统拒绝把它绑定到你选择的卡片档案；请插入正确的卡后重试。");
             }
-            int distinctCommittedMatches = managedRebind ? 0 : distinctCommittedCardIds.Length;
+            int distinctCommittedMatches = softwareInitialization ? 0 : managedRebind ? 0 : distinctCommittedCardIds.Length;
             if (distinctCommittedMatches > 1)
             {
                 throw new InvalidDataException(
@@ -781,9 +965,11 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
 
             Guid initializationCardId = managedCardInstanceId ??
-                (matchingPending.Length == 1
-                    ? matchingPending[0].CardInstanceId
-                    : Guid.NewGuid());
+                (softwareInitialization && TryGetMountedCardInstanceId(volumeKey, out Guid currentCardId)
+                    ? currentCardId
+                    : matchingPending.Length == 1
+                        ? matchingPending[0].CardInstanceId
+                        : Guid.NewGuid());
             // The pending baseline is the mutation intent. Unrelated cards' unfinished
             // initialization transactions remain untouched and can be recovered independently.
             await _configurationService.RebindCardProfileAsync(
@@ -798,7 +984,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 observed,
                 abandonOtherPending: false,
                 cancellationToken,
-                archiveExistingCommittedBaseline: managedRebind);
+                archiveExistingCommittedBaseline: managedRebind || softwareInitialization);
             StandaloneCardIdentityResolution card = await cardResolver.ReinitializeAsync(
                 observed,
                 initializationCardId,
@@ -807,7 +993,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             if (card.CardInstanceId != initializationCardId)
                 throw new InvalidDataException("The card instance identity is unavailable.");
             await baselineStore.CommitInitializationAsync(initializationCardId, cancellationToken);
-            managedCardInitializationCommitted = managedRebind;
+            managedCardInitializationCommitted = managedRebind || softwareInitialization;
 
             FaultDomainInfo persistedSource = faultDomains.ResolveLocalDomain(sourceRoot);
             if (!string.Equals(
@@ -827,6 +1013,28 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 _cardReassociationAuthorizedPreviousSourceIdentity = null;
                 _contentWitnessInvalidatedVolumeKeys.Remove(volumeKey);
             }
+            if (softwareInitialization)
+            {
+                object registered = SoftwareInitializationStatus(
+                    cameraTemplate.Name,
+                    inventory.TotalFiles,
+                    "当前卡已在软件中登记；已有素材只记录为起始基线，未复制、未校验目标，也未写入或格式化源卡。保存位置恢复后，后续新增素材会自动同步。");
+                UpdateMedia(volumeKey, media => media with
+                {
+                    CardInstanceId = initializationCardId.ToString("D"),
+                    CameraTemplateId = cameraTemplate.TemplateId.ToString("D"),
+                    IdentityState = "known",
+                    WorkState = "initialized",
+                    SafetyConclusion = "no_backup_conclusion",
+                    ReasonCode = "CARD_SOFTWARE_INITIALIZED",
+                    PrimaryAction = "retry",
+                    Detail = "软件初始化完成；现有素材仅登记为基线，未复制。"
+                });
+                SetTerminalStatus(registered);
+                currentVolumeResolved = true;
+                return new(registered, "软件初始化完成；现有素材仅登记为基线，未复制。", managedCardInitializationCommitted);
+            }
+
             if (inventory.TotalFiles > 0)
             {
                 Task? restarted = CompleteStateRepairAndStartTransfer(volume, forceReevaluation: true);
@@ -886,10 +1094,12 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         catch (Exception exception) when (
             exception is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
         {
+            _logger.LogWarning(exception, "card_reinitialize.failed ErrorType={ErrorType}.", exception.GetType().Name);
             object failed = FailureStatus(
                 "素材卡重新初始化未完成",
-                exception.Message,
-                canReinitializeCard: reinitializationAuthorized);
+                UserFacingFailureMessage(exception),
+                canReinitializeCard: reinitializationAuthorized,
+                guidance: ClassifyFailure(exception));
             SetTerminalStatus(failed);
             return new(
                 failed,
@@ -922,7 +1132,10 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             cancellation = _taskCts;
             _activeOperationId = null;
             _transferStatus.Stop();
-            status = FailureStatus("任务已停止", "任务没有完成所选目标的全部校验，不可以安全拔卡。");
+            status = FailureStatus(
+                "任务已停止",
+                "任务没有完成所选目标的全部校验，不可以安全拔卡。",
+                targetMode: _activeTargetMode);
             _status = status;
             ApplyMainStatusToActiveMediaNoLock(status);
         }
@@ -942,55 +1155,82 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         object status;
         lock (_gate)
         {
-            if (_activeTask is { IsCompleted: false })
+            KeyValuePair<string, StandaloneMediaItemDto>[] matches = _mediaStates
+                .Where(pair =>
+                    string.Equals(pair.Value.MountSessionId, expectedMountSessionId, StringComparison.Ordinal) &&
+                    string.Equals(pair.Value.PresenceState, "mounted", StringComparison.Ordinal) &&
+                    _knownVolumes.ContainsKey(pair.Key))
+                .ToArray();
+            if (matches.Length != 1)
+            {
+                return Task.FromResult(new StandaloneRuntimeOperationResult(
+                    _status,
+                    "素材卡已移除或状态已刷新，未改变其他卡；请刷新后重试。"));
+            }
+
+            string deferredVolumeKey = matches[0].Key;
+            StandaloneMediaItemDto selectedMedia = matches[0].Value;
+            bool selectedIsActive = string.Equals(
+                _activeVolumeKey, deferredVolumeKey, StringComparison.OrdinalIgnoreCase);
+            if (selectedIsActive && _activeTask is { IsCompleted: false })
             {
                 return Task.FromResult(new StandaloneRuntimeOperationResult(
                     _status,
                     "当前卡仍在复制或校验，不能暂缓。请先停止当前任务。"));
             }
-            if (!_currentVolumeBlocked || string.IsNullOrWhiteSpace(_activeVolumeKey))
+            bool canDefer = selectedIsActive && _currentVolumeBlocked ||
+                string.Equals(selectedMedia.WorkState, "awaiting_action", StringComparison.Ordinal) ||
+                string.Equals(selectedMedia.WorkState, "queued", StringComparison.Ordinal) ||
+                string.Equals(selectedMedia.WorkState, "deferred", StringComparison.Ordinal) ||
+                string.Equals(selectedMedia.WorkState, "blocked", StringComparison.Ordinal);
+            if (!canDefer)
             {
                 return Task.FromResult(new StandaloneRuntimeOperationResult(
                     _status,
-                    "当前没有阻塞其他素材卡的异常卡。"));
-            }
-            if (!_mediaStates.TryGetValue(_activeVolumeKey, out StandaloneMediaItemDto? activeMedia) ||
-                !string.Equals(
-                    activeMedia.MountSessionId,
-                    expectedMountSessionId,
-                    StringComparison.Ordinal))
-            {
-                return Task.FromResult(new StandaloneRuntimeOperationResult(
-                    _status,
-                    "素材卡状态已变化，未暂缓其他卡；请刷新后重试。"));
+                    "这张卡当前正在安全完成或已无需暂缓。"));
             }
 
-            string deferredVolumeKey = _activeVolumeKey;
+            _pendingVolumes.RemoveAll(work => string.Equals(
+                VolumeKey(work.Volume), deferredVolumeKey, StringComparison.OrdinalIgnoreCase));
             _deferredVolumeKeys.Add(deferredVolumeKey);
-            _currentVolumeBlocked = false;
-            _activeVolumeKey = null;
-            _activeOperationId = null;
-            _activeTask = null;
+            if (selectedIsActive)
+            {
+                _currentVolumeBlocked = false;
+                _activeVolumeKey = null;
+                _activeOperationId = null;
+                _activeTask = null;
+            }
             if (_mediaStates.TryGetValue(deferredVolumeKey, out StandaloneMediaItemDto? media))
             {
+                bool requiresScopeDecision = string.Equals(
+                    media.EligibilityState, "approved_range_missing", StringComparison.Ordinal);
                 _mediaStates[deferredVolumeKey] = media with
                 {
                     WorkState = "deferred",
                     QueuePosition = null,
                     SafetyConclusion = "no_backup_conclusion",
-                    ReasonCode = "USER_DEFERRED_BLOCKED_CARD",
-                    PrimaryAction = "retry",
-                    AvailableActions = ["retry", "configure_card_scope"],
-                    Detail = "这张卡仍未安全完成，已暂缓；其他已插入卡可以继续处理。",
+                    ReasonCode = requiresScopeDecision
+                        ? "USER_IGNORED_THIS_MOUNT"
+                        : "USER_DEFERRED_BLOCKED_CARD",
+                    PrimaryAction = requiresScopeDecision ? "configure_card_scope" : "retry",
+                    AvailableActions = requiresScopeDecision
+                        ? ["configure_card_scope", "prioritize"]
+                        : ["retry", "prioritize", "configure_card_scope"],
+                    Detail = requiresScopeDecision
+                        ? "本次插入已暂不处理；卡片记录和当前素材都没有被删除，其他卡可以继续。"
+                        : "这张卡仍未安全完成，已暂缓；失败证据保留，其他已插入卡可以继续处理。",
                 };
                 _mediaRevision++;
             }
+            ReindexQueuedMediaNoLock();
             status = WaitingStatus(
                 true,
-                "异常素材卡已暂缓",
-                "这张卡仍未安全完成；系统会继续处理队列中的其他素材卡。");
+                "素材卡已暂缓",
+                "这张卡没有被标记为完成；系统会继续处理队列中的其他素材卡。");
             _status = status;
-            startPending = !_stopping &&
+            startPending = _activeTask is not { IsCompleted: false } &&
+                !_currentVolumeBlocked &&
+                !_stopping &&
                 !_configurationChangeInProgress &&
                 !_stateRepairInProgress &&
                 _pendingVolumes.Count > 0;
@@ -1002,7 +1242,75 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             StartNextPendingVolume();
         return Task.FromResult(new StandaloneRuntimeOperationResult(
             GetStatusSnapshot(),
-            "已暂缓当前异常卡；失败记录和恢复证据均已保留。"));
+            "已暂缓所选素材卡；卡片记录、失败记录和恢复证据均已保留。"));
+    }
+
+    public Task<StandaloneRuntimeOperationResult> PrioritizeMountedVolumeAsync(
+        string mountSessionId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mountSessionId);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        bool startPending;
+        bool activeTaskContinues;
+        lock (_gate)
+        {
+            KeyValuePair<string, StandaloneMediaItemDto>[] matches = _mediaStates
+                .Where(pair =>
+                    string.Equals(pair.Value.MountSessionId, mountSessionId, StringComparison.Ordinal) &&
+                    string.Equals(pair.Value.PresenceState, "mounted", StringComparison.Ordinal) &&
+                    _knownVolumes.ContainsKey(pair.Key))
+                .ToArray();
+            if (matches.Length != 1)
+            {
+                return Task.FromResult(new StandaloneRuntimeOperationResult(
+                    _status,
+                    "素材卡已移除或状态已刷新，无法调整队列。"));
+            }
+
+            string volumeKey = matches[0].Key;
+            StandaloneMediaItemDto media = matches[0].Value;
+            int pendingIndex = _pendingVolumes.FindIndex(work => string.Equals(
+                VolumeKey(work.Volume), volumeKey, StringComparison.OrdinalIgnoreCase));
+            bool wasDeferred = _deferredVolumeKeys.Remove(volumeKey);
+            if (pendingIndex < 0 && !(wasDeferred && string.Equals(media.WorkState, "deferred", StringComparison.Ordinal)))
+            {
+                return Task.FromResult(new StandaloneRuntimeOperationResult(
+                    _status,
+                    "只能调整仍在排队或已暂缓的素材卡；当前卡正在处理或无需调整。"));
+            }
+
+            PendingVolumeWork pending;
+            if (pendingIndex >= 0)
+            {
+                pending = _pendingVolumes[pendingIndex];
+                _pendingVolumes.RemoveAt(pendingIndex);
+                pending = new PendingVolumeWork(pending.Volume, pending.ForceReevaluation || wasDeferred);
+            }
+            else
+            {
+                pending = new PendingVolumeWork(_knownVolumes[volumeKey], ForceReevaluation: true);
+            }
+            _pendingVolumes.Insert(0, pending);
+            ReindexQueuedMediaNoLock();
+
+            activeTaskContinues = _activeTask is { IsCompleted: false };
+            startPending = !activeTaskContinues &&
+                !_currentVolumeBlocked &&
+                !_stopping &&
+                !_configurationChangeInProgress &&
+                !_stateRepairInProgress;
+        }
+
+        RaiseMediaStatusChanged();
+        if (startPending)
+            StartNextPendingVolume();
+        return Task.FromResult(new StandaloneRuntimeOperationResult(
+            GetStatusSnapshot(),
+            activeTaskContinues
+                ? "已将该素材卡调整到待处理队首；当前正在复制的素材卡不会被中断。"
+                : "已将该素材卡调整到待处理队首，将在当前可开始时处理。"));
     }
 
     public async Task NotifyConfigurationChangedAsync(
@@ -1026,7 +1334,51 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             await TryStartMountedExternalVolumeAsync(cancellationToken);
     }
 
-    public async Task<StandaloneRuntimeOperationResult> ReassociateCurrentCardAsync(
+    public StandaloneRuntimeOperationResult StartPreferredMountedVolumeAfterConfiguration(
+        string mountSessionId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mountSessionId);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        VolumeEventArgs? preferred;
+        lock (_gate)
+        {
+            preferred = ResolveMountedVolumeForActionNoLock(mountSessionId);
+            if (preferred is null)
+            {
+                return new StandaloneRuntimeOperationResult(
+                    _status,
+                    "设置已保存，但这张素材卡已移除或状态已变化；重新插入后会按新范围识别。");
+            }
+        }
+
+        Task? preferredWork = TryStartTransfer(preferred, forceReevaluation: true);
+        RaiseMediaStatusChanged();
+
+        return new StandaloneRuntimeOperationResult(
+            GetStatusSnapshot(),
+            preferredWork is null
+                ? "这张素材卡已按新范围排队，将在当前可开始时自动检查。"
+                : "这张素材卡已按新范围开始检查；其他已插入卡仍保留在各自队列中。");
+    }
+
+    public Task<StandaloneRuntimeOperationResult> ReassociateCurrentCardAsync(
+        bool confirmed,
+        CancellationToken cancellationToken) =>
+        ReassociateCurrentCardAsyncCore(expectedMountSessionId: null, confirmed, cancellationToken);
+
+    public Task<StandaloneRuntimeOperationResult> ReassociateMountedCardAsync(
+        string expectedMountSessionId,
+        bool confirmed,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedMountSessionId);
+        return ReassociateCurrentCardAsyncCore(expectedMountSessionId, confirmed, cancellationToken);
+    }
+
+    private async Task<StandaloneRuntimeOperationResult> ReassociateCurrentCardAsyncCore(
+        string? expectedMountSessionId,
         bool confirmed,
         CancellationToken cancellationToken)
     {
@@ -1040,12 +1392,14 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 return new(_status, "当前任务仍在处理中，不能迁移素材卡基线。");
             if (_configurationChangeInProgress || _stateRepairInProgress)
                 return new(_status, "另一项设置或素材卡恢复操作仍在进行，请稍后重试。");
-            volume = _lastArrivedVolume;
+            volume = ResolveMountedVolumeForActionNoLock(expectedMountSessionId);
             if (volume is not null)
                 _stateRepairInProgress = true;
         }
         if (volume is null)
-            return new(GetStatusSnapshot(), "当前没有可确认的素材卡。");
+            return new(GetStatusSnapshot(), expectedMountSessionId is null
+                ? "当前没有可确认的素材卡。"
+                : "这张素材卡已移除或状态已变化，未迁移任何历史记录。");
 
         bool handedOffToTransfer = false;
         bool authorized = false;
@@ -1160,10 +1514,12 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         catch (Exception exception) when (
             exception is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
         {
+            _logger.LogWarning(exception, "card_reassociate.failed ErrorType={ErrorType}.", exception.GetType().Name);
             object failed = FailureStatus(
                 "同卡确认未完成",
-                exception.Message,
-                canReassociateCard: authorized);
+                UserFacingFailureMessage(exception),
+                canReassociateCard: authorized,
+                guidance: ClassifyFailure(exception));
             SetTerminalStatus(failed);
             return new(failed, "历史基线未被静默替换；修复问题后可以重试。");
         }
@@ -1293,7 +1649,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                         }
                         SetTerminalStatus(FailureStatus(
                             safeCompletedVolume ? "素材卡重新检查失败" : "素材卡检查失败",
-                            "无法读取已挂载素材卡的批准目录或验证路径安全性：" + exception.Message));
+                            UserFacingFailureMessage(exception),
+                            guidance: ClassifyFailure(exception)));
                         return;
                     }
 
@@ -1638,13 +1995,48 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
     {
         try
         {
-            return _sourceVolumeClassifier.IsExternalStorage(volume);
+            if (_sourceVolumeClassifier.IsExternalStorage(volume))
+                return true;
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(exception,
-                "Unable to prove that mounted volume {VolumeGuid} is external storage; ignoring it.",
+            _logger.LogInformation(exception,
+                "External storage classification was unavailable for {VolumeGuid}; using media-shape fallback.",
                 volume.VolumeGuid);
+        }
+
+        // Some SD readers are reported as Fixed and have no usable WMI metadata.
+        // A small read-only media-shape probe keeps those cards usable without
+        // treating the system drive as a source volume.
+        return LooksLikeMediaVolume(volume.DriveLetter);
+    }
+
+    private static bool LooksLikeMediaVolume(string driveLetter)
+    {
+        string root = Path.GetPathRoot(Path.GetFullPath(driveLetter)) ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(root) ||
+            string.Equals(root, Path.GetPathRoot(Environment.SystemDirectory), StringComparison.OrdinalIgnoreCase))
+            return false;
+        try
+        {
+            string[] directoryNames = Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly)
+                .Select(Path.GetFileName)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Select(name => name!)
+                .ToArray();
+            if (directoryNames.Any(name => name.Equals("DCIM", StringComparison.OrdinalIgnoreCase) ||
+                                           name.Equals("PRIVATE", StringComparison.OrdinalIgnoreCase) ||
+                                           name.Equals("VIDEO", StringComparison.OrdinalIgnoreCase) ||
+                                           name.Equals("CLIPS", StringComparison.OrdinalIgnoreCase) ||
+                                           name.Equals("CONTENTS", StringComparison.OrdinalIgnoreCase) ||
+                                           name.Equals("AVCHD", StringComparison.OrdinalIgnoreCase)))
+                return true;
+            string[] mediaExtensions = [".mp4", ".mov", ".mxf", ".mts", ".m2ts", ".wav", ".jpg", ".jpeg", ".png", ".heic"];
+            return Directory.EnumerateFiles(root, "*.*", SearchOption.TopDirectoryOnly)
+                .Any(path => mediaExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase));
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
             return false;
         }
     }
@@ -1677,7 +2069,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     _transferStatus.Stop();
                     removalStatus = FailureStatus(
                         "素材卡已移除",
-                        "复制没有确认安全完成。请重新插入同一张卡后重试。");
+                        "复制没有确认安全完成。请重新插入同一张卡后重试。",
+                        targetMode: _activeTargetMode);
                     _status = removalStatus;
                 }
             }
@@ -1833,6 +2226,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             _safeCompletedVolumeKeys.Remove(volumeKey);
         _transferStatus.Stop();
         _lastPublishedProgressSequence = 0;
+        _lastTransferStatusSnapshot = null;
+        _activeTargetMode = null;
         _taskCts?.Dispose();
         _taskCts = new CancellationTokenSource();
         Guid operationId = Guid.NewGuid();
@@ -1878,6 +2273,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
     private async Task RunTransferAsync(VolumeEventArgs volume, Guid operationId, CancellationToken cancellationToken)
     {
         Guid? resumeTaskId = null;
+        StandaloneTargetMode? selectedTargetMode = null;
         bool taskJournalInitialized = false;
         bool cardReinitializationAvailable = false;
         bool cardReassociationAvailable = false;
@@ -1888,6 +2284,12 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         string? cardReassociationPreviousSourceIdentity = null;
         string? observedSourceIdentity = null;
         string volumeKey = VolumeKey(volume);
+        using IDisposable? operationLogScope = _logger.BeginScope(
+            new Dictionary<string, object?>
+            {
+                ["OperationId"] = operationId,
+            });
+        IDisposable? taskLogScope = null;
         bool contentWitnessInvalidated;
         bool fullReverificationAuthorized;
         bool sourceCleanupAuthorized;
@@ -1935,6 +2337,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             configuration = configuration.NormalizeForCurrentSchema();
 
             StandaloneTargetMode targetMode = configuration.TargetMode;
+            selectedTargetMode = targetMode;
+            lock (_gate)
+                _activeTargetMode = targetMode;
             string sourceRoot = Path.GetFullPath(volume.DriveLetter);
             var faultDomains = new FaultDomainResolver();
             FaultDomainInfo sourceDomain = faultDomains.ResolveLocalDomain(sourceRoot);
@@ -2006,7 +2411,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     : $"已检测到 {volume.DriveLetter}，但未找到已批准素材目录";
                 string description = knownCard
                     ? $"当前卡中没有原素材范围 {string.Join("、", expectedDirectories)}。这通常发生在格式化、换相机或目录结构变化后；AutoCardSync 尚未处理当前内容。"
-                    : $"当前卡中没有素材范围 {string.Join("、", expectedDirectories)}。你可以把它设为新素材卡、恢复到历史卡，或忽略本次插入。";
+                    : $"当前卡中没有素材范围 {string.Join("、", expectedDirectories)}。请为这张卡选择实际素材位置，或暂不处理本次插入。";
                 UpdateMedia(volumeKeyForMedia, media => media with
                 {
                     EligibilityState = "approved_range_missing",
@@ -2021,7 +2426,6 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     AvailableActions =
                     [
                         "configure_card_scope",
-                        "treat_as_new_card",
                         "ignore_this_mount",
                     ],
                     Detail = description,
@@ -2078,6 +2482,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     ? "no_matching_files"
                     : "matching_files_found",
                 SelectedFileCount = fullInventory.TotalFiles,
+                SelectedBytes = fullInventory.TotalBytes,
                 WorkState = "scanning",
                 SafetyConclusion = "keep_inserted",
                 ReasonCode = "IDENTIFYING_CARD_FROM_SELECTED_CONTENT",
@@ -2337,6 +2742,17 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             });
             StandaloneInventoryBaseline? baseline = await baselineStore.FindByCardInstanceIdAsync(
                 cardInstanceId, cancellationToken);
+            DateTimeOffset? lastCompletedAtUtc = baseline?.LastCompletedTaskId is Guid lastCompletedTaskId
+                ? await TryReadVerifiedCompletionTimeAsync(lastCompletedTaskId, cancellationToken)
+                : null;
+            if (lastCompletedAtUtc is DateTimeOffset completedAtUtc)
+            {
+                UpdateMedia(volumeKey, media => media with
+                {
+                    LastCompletedAtUtc = completedAtUtc.ToUniversalTime().ToString(
+                        "O", CultureInfo.InvariantCulture),
+                });
+            }
             StandaloneTaskJournal? resumeCandidate = await taskCatalog.FindResumeCandidateByCardInstanceIdAsync(
                 cardInstanceId, cancellationToken);
             resumeTaskId = resumeCandidate?.TaskId;
@@ -2407,10 +2823,12 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     cancellationToken);
             }
             bool resumeFrozenContent = resumeCandidate?.ContentManifestFrozen == true;
-            await _configurationService.EnsureCardProfileAsync(
+            configuration = await _configurationService.EnsureCardProfileAsync(
                 cardInstanceId,
                 cameraTemplate.TemplateId,
                 cancellationToken);
+            resolvedProfile = configuration.CardProfiles.Single(profile =>
+                profile.CardInstanceId == cardInstanceId);
 
             StandaloneInventoryDelta delta = StandaloneInventoryBaselineStore.Compare(
                 baseline,
@@ -2423,7 +2841,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     ? "no_matching_files"
                     : "matching_files_found",
                 SelectedFileCount = fullInventory.TotalFiles,
+                SelectedBytes = fullInventory.TotalBytes,
                 DeltaFileCount = delta.TransferEntries.Count,
+                DeltaBytes = TotalBytes(delta.TransferEntries),
                 WorkState = "scanning",
                 SafetyConclusion = "keep_inserted",
                 ReasonCode = delta.TransferEntries.Count > 0
@@ -2455,6 +2875,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     delta = recovered.Delta;
                 }
             }
+            UpdateMedia(volumeKey, media => media with
+            {
+                SelectedFileCount = fullInventory.TotalFiles,
+                SelectedBytes = fullInventory.TotalBytes,
+                DeltaFileCount = delta.TransferEntries.Count,
+                DeltaBytes = TotalBytes(delta.TransferEntries),
+            });
             if (resumeCandidate is null && baseline is null)
             {
                 // A non-empty new card must not be silently absorbed into a historical
@@ -2499,7 +2926,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                         ? "no_matching_files"
                         : "matching_files_found",
                     SelectedFileCount = fullInventory.TotalFiles,
+                    SelectedBytes = fullInventory.TotalBytes,
                     DeltaFileCount = fullInventory.TotalFiles,
+                    DeltaBytes = fullInventory.TotalBytes,
                     WorkState = fullInventory.TotalFiles == 0 ? "completed" : "scanning",
                     SafetyConclusion = fullInventory.TotalFiles == 0
                         ? "no_backup_conclusion"
@@ -2539,7 +2968,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
 
                 cardReinitializationAvailable = true;
                 throw new IOException(
-                    "批准目录或扩展名策略与这张卡的历史基线不一致。系统没有更新基线，也没有把当前新增或被改写的素材吞入历史。请恢复原模板设置继续同步；如确需更换模板，请先在设置中选定新的默认模板，再明确确认重新初始化。");
+                    "这张卡的素材位置或文件类型与上次不同。系统没有改写旧记录，也没有跳过当前新增素材。请从素材卡中心调整这张卡的素材范围，确认预览后再继续。");
             }
 
             bool sourceCleanupDetected = resumeCandidate is null && delta.MissingPaths.Count > 0;
@@ -2742,7 +3171,20 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 }
             }
 
-            ResolvedTargetRoots targetRoots = ResolveTargetRoots(configuration, manifest, resumeCandidate);
+            taskLogScope = _logger.BeginScope(
+                new Dictionary<string, object?>
+                {
+                    ["TaskId"] = manifest.TaskId,
+                    ["CardInstanceId"] = card.CardInstanceId.Value,
+                    ["TargetMode"] = TargetModeKey(targetMode),
+                });
+
+            DateTimeOffset? freshTaskStartedAt = resumeCandidate is null ? DateTimeOffset.Now : null;
+            ResolvedTargetRoots targetRoots = ResolveTargetRoots(
+                configuration,
+                resolvedProfile.DisplayName,
+                freshTaskStartedAt,
+                resumeCandidate);
             FaultDomainInfo? localDomain = null;
             ResolvedSecondaryTarget? secondaryTarget = null;
             if (targetMode.RequiresLocal())
@@ -2755,11 +3197,19 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
             if (targetMode.RequiresNas())
             {
-                secondaryTarget = ResolveSecondaryTarget(
-                    faultDomains,
-                    configuration.NasMappedTargetPath,
-                    targetRoots.NasRoot!,
-                    isResume: resumeCandidate is not null);
+                try
+                {
+                    secondaryTarget = ResolveSecondaryTarget(
+                        faultDomains,
+                        configuration.NasMappedTargetPath,
+                        targetRoots.NasRoot!,
+                        isResume: resumeCandidate is not null);
+                }
+                catch (Exception exception) when (
+                    exception is IOException or UnauthorizedAccessException)
+                {
+                    throw new NasTargetUnavailableException(targetRoots.NasRoot!, exception);
+                }
             }
             EnsureNoOverlap(sourceRoot, targetRoots.LocalRoot, secondaryTarget?.CopyRoot);
             EnsureIndependentStorageSet(
@@ -2773,33 +3223,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             string journalLocation = GetJournalLocation(manifest.TaskId);
             var journalStore = new StandaloneTaskJournalStore(journalLocation);
             StandaloneTaskJournal? existingJournal = await journalStore.LoadAsync(cancellationToken);
-            if (existingJournal is null)
-            {
-                await journalStore.InitializeAsync(new StandaloneTaskJournal
-                {
-                    SchemaVersion = 2,
-                    TaskId = manifest.TaskId,
-                    CardInstanceId = card.CardInstanceId.Value,
-                    SourceIdentity = sourceDomain.StorageIdentity!,
-                    TargetMode = targetMode,
-                    InventoryManifestHash = manifest.ManifestHash,
-                    ManifestHash = string.Empty,
-                    ContentManifestFrozen = false,
-                    LocalTargetIdentity = localDomain?.StorageIdentity ?? string.Empty,
-                    LocalTargetRoot = targetRoots.LocalRoot ?? string.Empty,
-                    NasTargetIdentity = secondaryTarget?.Domain.StorageIdentity ?? string.Empty,
-                    NasTargetRoot = secondaryTarget?.CopyRoot ?? string.Empty,
-                    Files = manifest.Entries.Where(entry => !entry.Excluded).Select(entry => NewFileJournal(
-                        entry,
-                        targetMode,
-                        localTargetId,
-                        localDomain?.StorageIdentity,
-                        nasTargetId,
-                        secondaryTarget?.Domain.StorageIdentity)).ToArray(),
-                    UpdatedAtUtc = DateTimeOffset.UtcNow,
-                }, cancellationToken);
-            }
-            else
+            if (existingJournal is not null)
             {
                 if (existingJournal.ContentManifestFrozen)
                 {
@@ -2820,14 +3244,63 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                         targetMode,
                         existingJournal.ContentManifestFrozen ? existingJournal.InventoryManifestHash : manifest.ManifestHash));
                 if (!eligibility.CanResume)
-                    throw new IOException("上次任务的恢复身份不一致，已失败关闭：" + string.Join(", ", eligibility.Reasons));
+                {
+                    _logger.LogWarning(
+                        "recovery.rejected Reasons={RecoveryReasons}.",
+                        string.Join(",", eligibility.Reasons));
+                    throw new RecoveryStateChangedException(eligibility.Reasons);
+                }
                 if ((targetMode.RequiresLocal() &&
                      !string.Equals(existingJournal.LocalTargetRoot, targetRoots.LocalRoot, StringComparison.OrdinalIgnoreCase)) ||
                     (targetMode.RequiresNas() &&
                      !string.Equals(existingJournal.NasTargetRoot, secondaryTarget?.CopyRoot, StringComparison.OrdinalIgnoreCase)))
                 {
-                    throw new IOException("上次任务的目标路径和当前配置不一致，已失败关闭。");
+                    throw new RecoveryStateChangedException(["target_root_changed"]);
                 }
+            }
+
+            if (targetMode.RequiresLocal())
+            {
+                StandaloneTargetCapacityPreflight.EnsureSufficientSpace(
+                    "local", targetRoots.LocalRoot!, manifest, existingJournal);
+            }
+            if (targetMode.RequiresNas())
+            {
+                StandaloneTargetCapacityPreflight.EnsureSufficientSpace(
+                    "nas", secondaryTarget!.CopyRoot, manifest, existingJournal);
+            }
+
+            if (existingJournal is null)
+            {
+                IReadOnlyDictionary<string, string> destinationPaths =
+                    CopyPathConvention.BuildDestinationRelativePathMap(
+                        manifest.Entries.Where(entry => !entry.Excluded)
+                            .Select(entry => entry.RelativePath)
+                            .ToArray());
+                await journalStore.InitializeAsync(new StandaloneTaskJournal
+                {
+                    SchemaVersion = 3,
+                    TaskId = manifest.TaskId,
+                    CardInstanceId = card.CardInstanceId.Value,
+                    SourceIdentity = sourceDomain.StorageIdentity!,
+                    TargetMode = targetMode,
+                    InventoryManifestHash = manifest.ManifestHash,
+                    ManifestHash = string.Empty,
+                    ContentManifestFrozen = false,
+                    LocalTargetIdentity = localDomain?.StorageIdentity ?? string.Empty,
+                    LocalTargetRoot = targetRoots.LocalRoot ?? string.Empty,
+                    NasTargetIdentity = secondaryTarget?.Domain.StorageIdentity ?? string.Empty,
+                    NasTargetRoot = secondaryTarget?.CopyRoot ?? string.Empty,
+                    Files = manifest.Entries.Where(entry => !entry.Excluded).Select(entry => NewFileJournal(
+                        entry,
+                        destinationPaths[entry.RelativePath],
+                        targetMode,
+                        localTargetId,
+                        localDomain?.StorageIdentity,
+                        nasTargetId,
+                        secondaryTarget?.Domain.StorageIdentity)).ToArray(),
+                    UpdatedAtUtc = DateTimeOffset.UtcNow,
+                }, cancellationToken);
             }
 
             taskJournalInitialized = true;
@@ -2841,8 +3314,14 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     manifest.TotalBytes,
                     manifest.TotalFiles,
                     targetMode);
+                _lastTransferStatusSnapshot = null;
                 _lastPublishedProgressSequence = 0;
             }
+            _logger.LogInformation(
+                "transfer.started FileCount={FileCount}, PayloadBytes={PayloadBytes}, ResumeMode={ResumeMode}.",
+                manifest.TotalFiles,
+                manifest.TotalBytes,
+                resumeCandidate is null ? "fresh" : resumeFrozenContent ? "frozen" : "checkpoint");
 
             TaskManifest contentManifest;
             StandaloneSafetyResult safety;
@@ -2977,6 +3456,16 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 fullInventory,
                 contentManifest.TaskId,
                 cancellationToken);
+            DateTimeOffset? completionTimeUtc = await TryReadVerifiedCompletionTimeAsync(
+                contentManifest.TaskId, cancellationToken);
+            if (completionTimeUtc is DateTimeOffset verifiedCompletedAtUtc)
+            {
+                UpdateMedia(volumeKey, media => media with
+                {
+                    LastCompletedAtUtc = verifiedCompletedAtUtc.ToUniversalTime().ToString(
+                        "O", CultureInfo.InvariantCulture),
+                });
+            }
             await RefreshCardSafetyEvidenceAsync(
                 cardResolver,
                 card.CardInstanceId.Value,
@@ -2987,15 +3476,28 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 cancellationToken);
             RememberSafeCompletion(volume);
             currentVolumeSafe = true;
+            _logger.LogInformation(
+                "transfer.completed SafeToRemoveCard={SafeToRemoveCard}, CompletedFiles={CompletedFiles}, PayloadBytes={PayloadBytes}.",
+                safety.SafeToRemoveCard,
+                contentManifest.TotalFiles,
+                contentManifest.TotalBytes);
             SetOperationTerminalStatus(operationId, CompleteStatusForMode(contentManifest, safety, targetMode));
         }
         catch (OperationCanceledException)
         {
-            SetOperationTerminalStatus(operationId, FailureStatus("任务已停止", "任务没有完成所选目标的全部校验，不可以安全拔卡。"));
+            _logger.LogInformation("transfer.cancelled before a safe completion conclusion.");
+            SetOperationTerminalStatus(operationId, FailureStatus(
+                "任务已停止",
+                "任务没有完成所选目标的全部校验，不可以安全拔卡。",
+                targetMode: selectedTargetMode));
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(exception, "Standalone transfer failed closed.");
+            FailureUiGuidance guidance = ClassifyFailureForActiveTask(exception, selectedTargetMode);
+            _logger.LogWarning(
+                exception,
+                "transfer.failed_closed ErrorType={ErrorType}.",
+                exception.GetType().Name);
             lock (_gate)
             {
                 if (completionReverificationAvailable)
@@ -3030,15 +3532,18 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
             SetOperationTerminalStatus(operationId, FailureStatus(
                 "复制未安全完成",
-                UserFacingFailureMessage(exception),
+                UserFacingFailureMessage(exception, guidance),
                 canRestartFresh: completionReverificationAvailable ||
                     resumeTaskId.HasValue || taskJournalInitialized,
                 canReinitializeCard: cardReinitializationAvailable,
                 canReassociateCard: cardReassociationAvailable,
-                canConfirmSourceCleanup: sourceCleanupReviewAvailable));
+                canConfirmSourceCleanup: sourceCleanupReviewAvailable,
+                guidance: guidance,
+                targetMode: selectedTargetMode));
         }
         finally
         {
+            taskLogScope?.Dispose();
             if (currentVolumeSafe)
                 StartNextPendingVolume();
             else
@@ -3385,6 +3890,48 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         return sharded;
     }
 
+    private async Task<DateTimeOffset?> TryReadVerifiedCompletionTimeAsync(
+        Guid taskId,
+        CancellationToken cancellationToken)
+    {
+        if (taskId == Guid.Empty)
+            return null;
+
+        string receiptPath = _paths.GetCompletionReceiptPath(taskId);
+        string shardedJournal = _paths.GetTaskJournalDirectory(taskId);
+        string legacyJournal = _paths.GetTaskJournalPath(taskId);
+        string? journalLocation = Directory.Exists(shardedJournal) && File.Exists(Path.Combine(shardedJournal, "task.json"))
+            ? shardedJournal
+            : File.Exists(legacyJournal) ? legacyJournal : null;
+        if (journalLocation is null || !File.Exists(receiptPath))
+            return null;
+
+        try
+        {
+            StandaloneTaskJournal? journal = await new StandaloneTaskJournalStore(journalLocation)
+                .LoadAsync(cancellationToken);
+            StandaloneCompletionReceipt? receipt = await new AtomicJsonFileStore<StandaloneCompletionReceipt>(
+                receiptPath).LoadAsync(cancellationToken);
+            return journal is not null && receipt is not null && journal.LocalCompletionReceiptPersisted &&
+                StandaloneCompletionReceiptValidator.Evaluate(receipt, journal).IsValid
+                ? receipt.CompletedAtUtc
+                : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException or JsonException)
+        {
+            _logger.LogWarning(
+                exception,
+                "media.last_completion_unavailable ErrorType={ErrorType}.",
+                exception.GetType().Name);
+            return null;
+        }
+    }
+
     private static void EnsureFrozenRecoveryInventoryBinding(
         TaskManifest inventoryManifest,
         StandaloneTaskJournal journal)
@@ -3449,6 +3996,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
 
     private static StandaloneFileJournal NewFileJournal(
         ManifestEntry entry,
+        string destinationRelativePath,
         StandaloneTargetMode targetMode,
         Guid localTargetId,
         string? localIdentity,
@@ -3457,6 +4005,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         {
             FileId = entry.Id,
             RelativePath = entry.RelativePath,
+            DestinationRelativePath = CopyPathConvention.ValidateFlatFileName(destinationRelativePath),
             Length = entry.FileSize,
             SourceSha256 = entry.SourceHash ?? string.Empty,
             State = StandaloneFileState.Pending,
@@ -3529,7 +4078,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
 
     private static ResolvedTargetRoots ResolveTargetRoots(
         StandaloneConfiguration configuration,
-        TaskManifest manifest,
+        string cardDisplayName,
+        DateTimeOffset? freshTaskStartedAt,
         StandaloneTaskJournal? resumeCandidate)
     {
         if (resumeCandidate is not null)
@@ -3539,34 +4089,87 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 configuration.TargetMode.RequiresNas() ? resumeCandidate.NasTargetRoot : null);
         }
 
-        string suffix = configuration.TargetNamingRule switch
-        {
-            TargetNamingRule.PreserveRelativePath => string.Empty,
-            TargetNamingRule.ImportDate => DateTimeOffset.Now.ToString("yyyyMMdd", CultureInfo.InvariantCulture) + "-" + manifest.TaskId.ToString("N")[..8],
-            TargetNamingRule.CaptureDate => CaptureDateFolder(manifest) + "-" + manifest.TaskId.ToString("N")[..8],
-            _ => throw new InvalidDataException("Unsupported target naming rule."),
-        };
-
-        string? local = configuration.TargetMode.RequiresLocal()
-            ? AppendSuffix(Path.GetFullPath(configuration.LocalTargetPath), suffix)
+        DateTimeOffset taskStartedAt = freshTaskStartedAt ??
+            throw new InvalidDataException("Fresh tasks require a local task start time.");
+        string? localBase = configuration.TargetMode.RequiresLocal()
+            ? Path.GetFullPath(configuration.LocalTargetPath)
             : null;
-        string? nas = configuration.TargetMode.RequiresNas()
-            ? AppendSuffix(Path.GetFullPath(configuration.NasMappedTargetPath), suffix)
+        string? nasBase = configuration.TargetMode.RequiresNas()
+            ? Path.GetFullPath(configuration.NasMappedTargetPath)
             : null;
+        string folderName = ResolveAvailableTargetFolderName(
+            BuildTargetFolderName(cardDisplayName, taskStartedAt),
+            localBase,
+            nasBase);
+        string? local = localBase is null ? null : Path.Combine(localBase, folderName);
+        string? nas = nasBase is null ? null : Path.Combine(nasBase, folderName);
         return new(local, nas);
     }
 
-    private static string AppendSuffix(string root, string suffix) =>
-        string.IsNullOrEmpty(suffix) ? root : Path.Combine(root, suffix);
+    private static string BuildTargetFolderName(string cardDisplayName, DateTimeOffset taskStartedAt) =>
+        $"{SanitizeCardDisplayNameForFolder(cardDisplayName)} " +
+        taskStartedAt.ToLocalTime().ToString("M.d-HH：mm", CultureInfo.InvariantCulture);
 
-    private static string CaptureDateFolder(TaskManifest manifest)
+    private static string ResolveAvailableTargetFolderName(
+        string baseName,
+        string? localBase,
+        string? nasBase)
     {
-        DateTimeOffset value = manifest.Entries
-            .Where(entry => !entry.Excluded)
-            .Select(entry => entry.LastModifiedUtc)
-            .DefaultIfEmpty(DateTimeOffset.UtcNow)
-            .Min();
-        return value.ToLocalTime().ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+        if (!TargetFolderExists(baseName, localBase, nasBase))
+            return baseName;
+
+        for (int suffix = 2; ; suffix++)
+        {
+            string candidate = $"{baseName}（{suffix.ToString(CultureInfo.InvariantCulture)}）";
+            if (!TargetFolderExists(candidate, localBase, nasBase))
+                return candidate;
+        }
+    }
+
+    private static bool TargetFolderExists(string folderName, string? localBase, string? nasBase) =>
+        (localBase is not null && PathExists(Path.Combine(localBase, folderName))) ||
+        (nasBase is not null && PathExists(Path.Combine(nasBase, folderName)));
+
+    private static bool PathExists(string path) => Directory.Exists(path) || File.Exists(path);
+
+    private static string SanitizeCardDisplayNameForFolder(string cardDisplayName)
+    {
+        const string fallback = "未命名素材卡";
+        const int maxLength = 80;
+        string sanitized = new string((cardDisplayName ?? string.Empty)
+            .Where(character => !IsInvalidWindowsFileNameCharacter(character))
+            .ToArray())
+            .Trim()
+            .TrimEnd('.', ' ');
+        if (string.IsNullOrEmpty(sanitized))
+            return fallback;
+
+        if (IsReservedWindowsDeviceName(sanitized))
+            sanitized = "_" + sanitized;
+        if (sanitized.Length > maxLength)
+            sanitized = sanitized[..maxLength].TrimEnd('.', ' ');
+
+        return string.IsNullOrEmpty(sanitized) ? fallback : sanitized;
+    }
+
+    private static bool IsInvalidWindowsFileNameCharacter(char character) =>
+        char.IsControl(character) ||
+        character is '<' or '>' or ':' or '"' or '/' or '\\' or '|' or '?' or '*';
+
+    private static bool IsReservedWindowsDeviceName(string value)
+    {
+        int extensionIndex = value.IndexOf('.');
+        string deviceName = (extensionIndex >= 0 ? value[..extensionIndex] : value)
+            .TrimEnd('.', ' ');
+        return deviceName.Equals("CON", StringComparison.OrdinalIgnoreCase) ||
+            deviceName.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
+            deviceName.Equals("AUX", StringComparison.OrdinalIgnoreCase) ||
+            deviceName.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
+            deviceName.Equals("CLOCK$", StringComparison.OrdinalIgnoreCase) ||
+            (deviceName.Length == 4 &&
+                (deviceName.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
+                 deviceName.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
+                deviceName[3] is >= '1' and <= '9');
     }
 
     private sealed record ResolvedTargetRoots(string? LocalRoot, string? NasRoot);
@@ -3753,8 +4356,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             return defaultTemplate;
         throw new InvalidDataException(
             candidateMatches.Length == 0
-                ? "当前素材卡无法唯一匹配相机模板。请在设置中选择正确模板并设为默认，然后明确确认重新初始化；系统尚未写入素材卡档案或基线。"
-                : "当前素材卡同时匹配多个相机模板。请在设置中消除重叠或选择正确模板并设为默认，然后明确确认重新初始化；系统尚未写入素材卡档案或基线。");
+                ? "当前素材卡无法唯一匹配已记录的素材范围。请在素材卡中心为这张卡选择正确的素材位置和文件类型；系统尚未写入卡片档案或基线。"
+                : "当前素材卡同时匹配多个素材范围。请在素材卡中心为这张卡选择一个明确范围；系统尚未写入卡片档案或基线。");
     }
 
     private static string CreateTransferConfigurationFingerprint(StandaloneConfigurationDto configuration)
@@ -4154,24 +4757,36 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         return targets.ToArray();
     }
 
-    private static object FailureStatus(
+    private object FailureStatus(
         string title,
         string message,
         bool canRestartFresh = false,
         bool canReinitializeCard = false,
         bool canReassociateCard = false,
-        bool canConfirmSourceCleanup = false) => new
+        bool canConfirmSourceCleanup = false,
+        FailureUiGuidance? guidance = null,
+        StandaloneTargetMode? targetMode = null)
+    {
+        FailureUiGuidance effectiveGuidance = guidance ?? FailureUiGuidance.Unknown;
+        object[] targetSummary = targetMode is StandaloneTargetMode selectedTargetMode
+            ? FailureTargetSummary(selectedTargetMode)
+            : [];
+        return new
         {
             view = "failure",
             configured = true,
+            targetMode = targetMode is StandaloneTargetMode mode ? TargetModeKey(mode) : string.Empty,
             phase = "failed",
             safeToRemoveCard = false,
             failure = new
             {
                 title,
                 what = message,
+                errorCategory = effectiveGuidance.ErrorCategory,
+                actionHints = effectiveGuidance.ActionHints,
+                targetSummary,
                 safety = "未满足安全完成条件，请不要依据当前进度拔卡。",
-                next = canConfirmSourceCleanup
+            next = canConfirmSourceCleanup
                     ? "如果这些历史素材确实由你主动删除或已在相机中清理，请确认清理；系统会保留清理前快照，再继续使用这张卡。"
                     : canReassociateCard
                     ? "若只是更换了读卡器，请确认这是同一张卡以保留旧基线并检查新增素材；只有确认为新卡时才重新初始化。"
@@ -4179,15 +4794,122 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                         ? "先重新检查；若旧任务证据已无法恢复，可保留旧记录并按当前素材重新开始。"
                         : canReinitializeCard
                             ? "先重新检查；若卡片身份、档案或基线持续冲突，可明确确认后重新初始化这张卡。"
-                            : "保持当前连接并重新检查；如果错误持续出现，请检查素材范围和保存位置设置。",
+                            : "保持当前连接并重新检查；如果卡内目录发生变化，请直接在素材卡中心调整这张卡，保存目标不可用时只需恢复连接后重试。",
                 canRestartFresh,
                 canReinitializeCard,
                 canReassociateCard,
                 canConfirmSourceCleanup,
             },
             safety = PendingSafety(),
-            targets = Array.Empty<object>(),
+            targets = targetSummary,
         };
+    }
+
+    private object[] FailureTargetSummary(StandaloneTargetMode targetMode)
+    {
+        StandaloneTransferStatusSnapshot? snapshot = _lastTransferStatusSnapshot;
+        var targets = new List<object>(2);
+        if (targetMode.RequiresLocal())
+            targets.Add(FailureTargetStatus("local", "本地目标", snapshot?.TaskId, snapshot?.Local));
+        if (targetMode.RequiresNas())
+            targets.Add(FailureTargetStatus("mappedNas", "NAS 目标", snapshot?.TaskId, snapshot?.Nas));
+        return targets.ToArray();
+    }
+
+    private static object FailureTargetStatus(
+        string kind,
+        string label,
+        Guid? taskId,
+        TargetCopyStatus? value)
+    {
+        if (value is null)
+        {
+            return new
+            {
+                kind,
+                label,
+                taskId = taskId?.ToString("D") ?? string.Empty,
+                state = "unknown",
+                statusKnown = false,
+                isComplete = false,
+                safeToRemoveCard = false,
+                copyPercent = 0d,
+                verificationPercent = 0d,
+                filesVerified = 0,
+                totalFiles = 0,
+                filesFailed = 0,
+                detail = "未能可靠取得该目标的最后状态。",
+            };
+        }
+
+        long verificationBytes = checked(value.TemporaryBytesVerified + value.FinalBytesVerified);
+        double verificationTotalBytes = value.TotalBytes * 2d;
+        bool complete = value.IsComplete && value.FilesFailed == 0;
+        return new
+        {
+            kind,
+            label,
+            taskId = taskId?.ToString("D") ?? string.Empty,
+            state = value.Phase switch
+            {
+                CopyPhase.Copying => "copying",
+                CopyPhase.Verifying or CopyPhase.TemporaryVerifying or CopyPhase.FinalVerifying => "verifying",
+                CopyPhase.Publishing => "publishing",
+                CopyPhase.Completed => "complete",
+                CopyPhase.Failed => "failed",
+                _ => "unknown",
+            },
+            statusKnown = true,
+            isComplete = complete,
+            safeToRemoveCard = false,
+            copyPercent = Percent(value.BytesCopied, value.TotalBytes),
+            verificationPercent = Percent(verificationBytes, verificationTotalBytes),
+            filesVerified = value.FilesVerified,
+            totalFiles = value.TotalFiles,
+            filesFailed = value.FilesFailed,
+            detail = complete
+                ? "该目标最后一次上报为已完成；整体任务仍未安全完成。"
+                : "这是任务停止前最后一次已知状态；整体任务未安全完成。",
+        };
+    }
+
+    private sealed record FailureUiGuidance(string ErrorCategory, IReadOnlyList<string> ActionHints)
+    {
+        public static FailureUiGuidance Unknown { get; } = new(
+            "unknown",
+            ["保持素材卡和所选保存目标连接。", "检查后重新尝试；未完成前不要拔卡或清理素材。"]);
+    }
+
+    private bool TryGetMountedCardInstanceId(string volumeKey, out Guid cardInstanceId)
+    {
+        lock (_gate)
+        {
+            if (_mediaStates.TryGetValue(volumeKey, out StandaloneMediaItemDto? media) &&
+                Guid.TryParse(media.CardInstanceId, out cardInstanceId) &&
+                cardInstanceId != Guid.Empty)
+            {
+                return true;
+            }
+        }
+        cardInstanceId = Guid.Empty;
+        return false;
+    }
+
+    private static object SoftwareInitializationStatus(string templateName, int fileCount, string description) => new
+    {
+        view = "waiting",
+        configured = true,
+        phase = "software-initialized",
+        headline = "这张卡已完成软件初始化",
+        description,
+        templateName,
+        registeredFileCount = fileCount,
+        safeToRemoveCard = false,
+        baselinePersisted = true,
+        softwareInitialized = true,
+        safety = PendingSafety(),
+        targets = Array.Empty<object>(),
+    };
 
     private static object BaselineReadyStatus(string headline, string description) => new
     {
@@ -4260,6 +4982,18 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             safeToRemoveCard = safety.SafeToRemoveCard,
         };
 
+    private static long TotalBytes(IEnumerable<ManifestEntry> entries)
+    {
+        long total = 0;
+        foreach (ManifestEntry entry in entries)
+        {
+            if (entry.FileSize < 0)
+                throw new InvalidDataException("素材清单包含无效文件大小。");
+            total = checked(total + entry.FileSize);
+        }
+        return total;
+    }
+
     private static double Percent(long value, double total) =>
         total <= 0 ? 0 : Math.Round(Math.Clamp(value * 100.0 / total, 0, 100), 2);
 
@@ -4313,11 +5047,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         {
             if (_activeOperationId is not Guid operationId ||
                 !_transferStatus.IsActive(progress.TaskId) ||
-                progress.Sequence <= _lastPublishedProgressSequence)
+                progress.Sequence <= _lastPublishedProgressSequence ||
+                _activeTargetMode is not StandaloneTargetMode activeTargetMode)
             {
                 return;
             }
-            payload = ToStatusForMode(progress, PendingSafety(), _activeTargetMode, operationId);
+            payload = ToStatusForMode(progress, PendingSafety(), activeTargetMode, operationId);
+            _lastTransferStatusSnapshot = progress;
             _lastPublishedProgressSequence = progress.Sequence;
             _status = payload;
             UpdateMediaNoLock(_activeVolumeKey ?? string.Empty, media => media with
@@ -4409,6 +5145,23 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         };
     }
 
+    private VolumeEventArgs? ResolveMountedVolumeForActionNoLock(string? expectedMountSessionId)
+    {
+        if (string.IsNullOrWhiteSpace(expectedMountSessionId))
+            return _lastArrivedVolume;
+
+        foreach ((string volumeKey, StandaloneMediaItemDto media) in _mediaStates)
+        {
+            if (string.Equals(media.MountSessionId, expectedMountSessionId, StringComparison.Ordinal) &&
+                string.Equals(media.PresenceState, "mounted", StringComparison.Ordinal) &&
+                _knownVolumes.TryGetValue(volumeKey, out VolumeEventArgs? volume))
+            {
+                return volume;
+            }
+        }
+        return null;
+    }
+
     private void EnsureMediaStateNoLock(VolumeEventArgs volume)
     {
         string volumeKey = VolumeKey(volume);
@@ -4488,8 +5241,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 QueuePosition = queuePosition,
                 SafetyConclusion = "no_backup_conclusion",
                 ReasonCode = "WAITING_FOR_ACTIVE_CARD",
-                PrimaryAction = string.Empty,
-                AvailableActions = [],
+                PrimaryAction = "prioritize",
+                AvailableActions = ["prioritize"],
                 Detail = $"已检测到素材卡，当前排队第 {queuePosition} 位；尚未开始复制。",
             });
         }
@@ -4506,6 +5259,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         string view = status.GetType().GetProperty("view")?.GetValue(status) as string ?? string.Empty;
         string phase = status.GetType().GetProperty("phase")?.GetValue(status) as string ?? string.Empty;
         string headline = status.GetType().GetProperty("headline")?.GetValue(status) as string ?? string.Empty;
+        (string failurePrimaryAction, IReadOnlyList<string> failureActions) =
+            FailureMediaActions(status);
         if (string.Equals(view, "waiting", StringComparison.Ordinal) &&
             string.Equals(media.WorkState, "awaiting_action", StringComparison.Ordinal))
         {
@@ -4560,13 +5315,60 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 WorkState = "blocked",
                 QueuePosition = null,
                 SafetyConclusion = "no_backup_conclusion",
-                ReasonCode = "CARD_REQUIRES_ATTENTION",
-                PrimaryAction = "retry",
-                AvailableActions = ["retry", "defer_current_card", "configure_card_scope"],
-                Detail = "这张卡尚未安全完成；可以恢复本卡，或暂缓后继续处理其他卡。",
+                ReasonCode = string.IsNullOrWhiteSpace(current.ReasonCode) ||
+                    string.Equals(current.ReasonCode, "CARD_TASK_ACTIVE", StringComparison.Ordinal)
+                        ? "CARD_REQUIRES_ATTENTION"
+                        : current.ReasonCode,
+                PrimaryAction = string.IsNullOrWhiteSpace(failurePrimaryAction)
+                    ? string.IsNullOrWhiteSpace(current.PrimaryAction) ? "retry" : current.PrimaryAction
+                    : failurePrimaryAction,
+                AvailableActions = current.AvailableActions
+                    .Concat(failureActions)
+                    .Append("defer_current_card")
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray(),
+                Detail = string.IsNullOrWhiteSpace(current.Detail)
+                    ? "这张卡尚未安全完成；可以恢复本卡，或暂缓后继续处理其他卡。"
+                    : current.Detail,
             },
             _ => current,
         });
+    }
+
+    private static (string PrimaryAction, IReadOnlyList<string> Actions) FailureMediaActions(object status)
+    {
+        object? failure = status.GetType().GetProperty("failure")?.GetValue(status);
+        if (failure is null)
+            return (string.Empty, []);
+
+        bool Flag(string name) => failure.GetType().GetProperty(name)?.GetValue(failure) is true;
+        var actions = new List<string>(6);
+        string primary = "retry";
+        if (Flag("canConfirmSourceCleanup"))
+        {
+            primary = "confirm_source_cleanup";
+            actions.Add(primary);
+        }
+        if (Flag("canReassociateCard"))
+        {
+            if (primary == "retry")
+                primary = "reassociate_card";
+            actions.Add("reassociate_card");
+        }
+        if (Flag("canReinitializeCard"))
+        {
+            if (primary == "retry")
+                primary = "treat_as_new_card";
+            actions.Add("treat_as_new_card");
+        }
+        if (Flag("canRestartFresh"))
+        {
+            if (primary == "retry")
+                primary = "restart_fresh";
+            actions.Add("restart_fresh");
+        }
+        actions.Add("retry");
+        return (primary, actions);
     }
 
     private void RaiseMediaStatusChanged()
@@ -4619,12 +5421,93 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             cancellationToken);
     }
 
-    private static string UserFacingFailureMessage(Exception exception) => exception switch
+    private FailureUiGuidance ClassifyFailureForActiveTask(
+        Exception exception,
+        StandaloneTargetMode? targetMode)
     {
-        ConflictException conflict =>
-            $"保存位置已存在同名文件，系统没有覆盖它：{conflict.ExistingPath}。请在设置中改用“按导入日期”或“按拍摄日期”命名，或选择不会重名的新保存位置，然后重新检查。",
-        _ => exception.Message,
+        FailureUiGuidance direct = ClassifyFailure(exception);
+        if (!string.Equals(direct.ErrorCategory, "unknown", StringComparison.Ordinal) ||
+            targetMode is not StandaloneTargetMode mode ||
+            !mode.RequiresNas() ||
+            _lastTransferStatusSnapshot?.Nas.Phase != CopyPhase.Failed)
+        {
+            return direct;
+        }
+
+        return new FailureUiGuidance(
+            "nas_unavailable",
+            ["确认 NAS 已连接且映射盘仍可访问。", "恢复 NAS 访问后重新检查；系统不会跳过 NAS 完成当前任务。"]);
+    }
+
+    private static FailureUiGuidance ClassifyFailure(Exception exception) => exception switch
+    {
+        InsufficientTargetSpaceException => new(
+            "insufficient_space",
+            ["清理对应保存目标的可用空间。", "保持素材卡连接后重新检查；不会跳过任一所选目标。"]),
+        NasTargetUnavailableException => new(
+            "nas_unavailable",
+            ["确认 NAS 已开机且映射盘仍可访问。", "确认 NAS 权限后保持素材卡连接并重新检查。"]),
+        TargetCapacityUnavailableException { TargetRole: "nas" } => new(
+            "nas_unavailable",
+            ["确认 NAS 已连接且映射盘可读取。", "恢复访问后重新检查；系统不会假设 NAS 空间足够。"]),
+        TargetCapacityUnavailableException => new(
+            "target_unavailable",
+            ["确认本地保存磁盘已连接且可读取。", "恢复访问后重新检查；系统不会假设空间足够。"]),
+        PublishOperationException or ConflictException => new(
+            "publish_conflict",
+            ["不要覆盖或手动替换保存目标中的同名文件。", "检查命名规则和保存目标后重新尝试。"]),
+        RecoveryStateChangedException => new(
+            "recovery_state_changed",
+            ["保持同一张素材卡和原保存目标连接。", "不要修改恢复用临时文件；重新检查后按提示恢复。"]),
+        IdentityChangedException { Operation: var operation } when
+            operation.StartsWith("frozen-recovery", StringComparison.OrdinalIgnoreCase) ||
+            operation.Contains("temporary", StringComparison.OrdinalIgnoreCase) => new(
+            "recovery_state_changed",
+            ["保持同一张素材卡和原保存目标连接。", "不要替换或修改临时文件；重新检查后恢复。"]),
+        IdentityChangedException => new(
+            "identity_changed",
+            ["保持同一张素材卡和原保存目标连接。", "重新检查身份后再继续，未完成前不要拔卡。"]),
+        _ => FailureUiGuidance.Unknown,
     };
+
+    private static string UserFacingFailureMessage(
+        Exception exception,
+        FailureUiGuidance? guidance = null) => exception switch
+    {
+        InsufficientTargetSpaceException space =>
+            $"{TargetRoleLabel(space.TargetRole)}可用空间不足：本次仍需至少 {FormatBytes(space.RequiredBytes)}，当前可用 {FormatBytes(space.AvailableBytes)}。系统尚未开始复制。",
+        TargetCapacityUnavailableException { TargetRole: "nas" } =>
+            "无法读取 NAS 保存目标的可用空间。请确认 NAS 已连接、映射盘可访问且权限正常后重新检查。",
+        TargetCapacityUnavailableException =>
+            "无法读取保存目标的可用空间。请确认目标磁盘可访问后重新检查。",
+        NasTargetUnavailableException =>
+            "NAS 保存目标当前不可用。请确认 NAS、映射盘和访问权限正常后重新检查。",
+        RecoveryStateChangedException =>
+            "恢复所需的素材卡、保存目标或临时对象状态已经变化。系统已保留证据；请恢复原连接后重新检查。",
+        IdentityChangedException { Operation: var operation } when
+            operation.StartsWith("frozen-recovery", StringComparison.OrdinalIgnoreCase) ||
+            operation.Contains("temporary", StringComparison.OrdinalIgnoreCase) =>
+            "恢复所需的临时对象发生变化或已被替换。系统已停止；请不要修改临时文件，恢复原连接后重新检查。",
+        IdentityChangedException =>
+            "素材卡或保存目标在处理过程中发生了身份变化。系统已停止并保留恢复证据；请保持同一张卡和原保存目标连接，然后重新检查。",
+        PublishOperationException or ConflictException =>
+            "保存目标存在无法安全处理的同名对象。系统没有覆盖现有文件；请检查命名规则和保存位置后重新检查。",
+        _ when string.Equals(guidance?.ErrorCategory, "nas_unavailable", StringComparison.Ordinal) =>
+            "NAS 保存目标在任务中断开或不可访问。请恢复 NAS、映射盘和权限后重新检查；系统没有跳过 NAS。",
+        _ => "任务未能安全完成。系统已停止并保留恢复证据；请保持当前连接并重新检查。",
+    };
+
+    private static string TargetRoleLabel(string targetRole) =>
+        string.Equals(targetRole, "nas", StringComparison.Ordinal) ? "NAS 保存目标" : "本地保存目标";
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024 * 1024)
+            return $"{bytes / 1024d / 1024d / 1024d:F1} GiB";
+        if (bytes >= 1024L * 1024)
+            return $"{bytes / 1024d / 1024d:F1} MiB";
+        return $"{Math.Max(0, bytes)} B";
+    }
 
     private Task? CompleteStateRepairAndStartTransfer(
         VolumeEventArgs volume,

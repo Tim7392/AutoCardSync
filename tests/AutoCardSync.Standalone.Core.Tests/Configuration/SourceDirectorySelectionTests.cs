@@ -22,12 +22,15 @@ public sealed class SourceDirectorySelectionTests : IDisposable
     }
 
     [Fact]
-    public void Selecting_the_volume_root_is_rejected()
+    public void Selecting_the_volume_root_is_preserved_as_the_explicit_root_scope()
     {
         Directory.CreateDirectory(_volumeRoot);
 
-        Assert.Throws<InvalidDataException>(() =>
-            SourceDirectorySelectionResolver.Resolve(_volumeRoot, _volumeRoot));
+        SourceDirectorySelection result = SourceDirectorySelectionResolver.Resolve(_volumeRoot, _volumeRoot);
+
+        Assert.Equal(Path.GetFullPath(_volumeRoot), result.FullPath);
+        Assert.Equal(Path.GetFullPath(_volumeRoot), result.VolumeRoot);
+        Assert.Equal(".", result.RelativePath);
     }
 
     [Fact]

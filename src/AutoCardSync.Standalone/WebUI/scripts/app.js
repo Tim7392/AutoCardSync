@@ -18,6 +18,7 @@
   const COMMAND_TYPES = new Set([
     'configuration.get',
     'configuration.save',
+    'card.initialize',
     'picker.selectFolder',
     'status.refresh',
     'task.retry',
@@ -29,7 +30,11 @@
     'card.profile.reinitialize',
     'card.confirmSourceCleanup',
     'task.cancel',
-    'media.defer'
+    'media.defer',
+    'media.prioritize',
+    'history.get',
+    'storage.test',
+    'window.exit'
   ]);
   const TARGET_STATE_LABELS = Object.freeze({
     waiting: '等待开始',
@@ -57,12 +62,15 @@
   const byId = id => document.getElementById(id);
   const bridge = window.chrome && window.chrome.webview ? window.chrome.webview : null;
   const pendingRequests = new Map();
-  const SENSITIVE_COMMAND_TYPES = new Set(['configuration.save', 'card.profile.configure']);
+  const SENSITIVE_COMMAND_TYPES = new Set(['configuration.save', 'card.initialize', 'card.profile.configure']);
   let currentOperationId = null;
   let currentScreen = 'home';
   let latestStatus = null;
   let latestConfiguration = null;
   let latestMediaStatus = null;
+  let latestHistory = [];
+  let historyLoading = false;
+  let nasTestInFlight = false;
   let cameraTemplates = [];
   let activeCameraTemplateId = '';
   let defaultCameraTemplateId = '';
@@ -71,6 +79,8 @@
   let currentSetupStep = 0;
   let setupFirstRun = false;
   let pendingManagedRebind = null;
+  let pendingInsertedCardSetup = null;
+  let pendingCardDecision = null;
   const pendingMetricRenders = new Map();
   let metricRenderTimer = 0;
   let lastMetricRenderAt = Number.NEGATIVE_INFINITY;
@@ -85,6 +95,50 @@
 
   function safeText(value, fallback = '') {
     return typeof value === 'string' && value.trim() ? value.trim().slice(0, 600) : fallback;
+  }
+
+  const THEME_STORAGE_KEY = 'autocardsync.theme-preference';
+  const THEME_MODES = Object.freeze(['system', 'dark', 'light']);
+
+  function readThemePreference() {
+    try {
+      const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+      return THEME_MODES.includes(value) ? value : 'system';
+    } catch {
+      return 'system';
+    }
+  }
+
+  function themeLabel(mode) {
+    return mode === 'dark' ? '深色' : mode === 'light' ? '浅色' : '跟随系统';
+  }
+
+  function applyTheme(mode, persist = false) {
+    const selected = THEME_MODES.includes(mode) ? mode : 'system';
+    document.documentElement.dataset.theme = selected;
+    const colorScheme = document.querySelector('meta[name="color-scheme"]');
+    if (colorScheme) colorScheme.content = selected === 'dark' ? 'dark' : selected === 'light' ? 'light' : 'light dark';
+    const button = byId('themeToggleBtn');
+    if (button) {
+      const next = selected === 'system' ? 'dark' : selected === 'dark' ? 'light' : 'system';
+      button.dataset.themeMode = selected;
+      button.setAttribute('aria-pressed', selected === 'dark' ? 'true' : 'false');
+      button.setAttribute('aria-label', '外观：' + themeLabel(selected) + '；点击切换为' + themeLabel(next));
+      button.title = '外观：' + themeLabel(selected) + '（点击切换为' + themeLabel(next) + '）';
+      button.textContent = selected === 'dark' ? '●' : selected === 'light' ? '☼' : '◐';
+    }
+    if (!persist) return;
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, selected);
+    } catch {
+      showToast('外观选择仅在本次打开期间有效');
+    }
+  }
+
+  function cycleTheme() {
+    const current = readThemePreference();
+    const next = current === 'system' ? 'dark' : current === 'dark' ? 'light' : 'system';
+    applyTheme(next, true);
   }
 
   function normalizeTargetMode(value) {
@@ -271,7 +325,11 @@
       return;
     }
     pendingRequests.delete(requestId);
-    showToast('桌面应用 30 秒内未响应，操作结果未确认；请先刷新状态再决定是否重试');
+    const handled = handleTransientResponse(pending, {
+      success: false,
+      error: '桌面应用 30 秒内未响应，操作结果未确认。'
+    });
+    if (!handled) showToast('桌面应用 30 秒内未响应，操作结果未确认；请先刷新状态再决定是否重试');
   }
 
   function postCommand(type, payload = {}, context = null) {
@@ -308,12 +366,38 @@
     overlay.setAttribute('aria-hidden', 'true');
   }
 
+  function updateSetupModeCopy() {
+    const cardContext = pendingManagedRebind || pendingInsertedCardSetup;
+    const cardMode = cardContext !== null;
+    byId('setup').classList.toggle('card-scope-mode', cardMode);
+    byId('setupEyebrow').textContent = cardMode ? '这张卡 · 两个步骤' : '第一次使用 · 约 2 分钟';
+    const registeringNewCard = pendingInsertedCardSetup !== null;
+    byId('setupTitle').textContent = registeringNewCard
+      ? `初始化“${cardContext.displayName}”`
+      : cardMode
+        ? `调整“${cardContext.displayName}”的素材范围`
+        : '让插卡后的工作自动完成。';
+    byId('setupIntro').textContent = registeringNewCard
+      ? '只在软件中登记这张卡和素材范围，不格式化、不写入源卡；卡内已有文件只作为起始基线，不会被复制。'
+      : cardMode
+        ? '只为这张卡选择素材位置和文件类型。保存位置、其他卡片和历史记录不会被一起改动。'
+        : '跟着四个简单步骤选择素材范围和保存位置。完成后 AutoCardSync 会常驻托盘，插卡即开始。';
+    byId('setupCancelBtn').textContent = cardMode ? '返回素材卡中心' : '返回首页';
+    byId('setupSubmitBtn').textContent = registeringNewCard
+      ? '初始化此卡（不复制现有素材）'
+      : cardMode ? '保存此卡范围并重新检查' : '完成设置并开始检测';
+  }
+
   function openSetup(options = {}) {
-    if (options.preserveManagedRebind !== true) pendingManagedRebind = null;
+    if (options.preserveCardContext !== true) {
+      pendingManagedRebind = null;
+      pendingInsertedCardSetup = null;
+    }
     setupFirstRun = options.firstRun === true || !(latestConfiguration && latestConfiguration.configured === true);
     byId('app').classList.toggle('first-run', setupFirstRun);
     byId('setupError').textContent = '';
     byId('setupSubmitBtn').disabled = hasPendingSensitiveOperation();
+    updateSetupModeCopy();
     showSetupStep(Number.isInteger(options.step) ? options.step : 0, false);
     showScreen('setup');
   }
@@ -321,13 +405,17 @@
   function closeSetup() {
     byId('setupSubmitBtn').disabled = hasPendingSensitiveOperation();
     if (setupFirstRun) return;
+    const returnToCards = pendingManagedRebind !== null || pendingInsertedCardSetup !== null;
     pendingManagedRebind = null;
+    pendingInsertedCardSetup = null;
     if (latestConfiguration) {
       setCameraTemplates(latestConfiguration);
       renderManagedCards(latestConfiguration);
     }
     byId('app').classList.remove('first-run');
-    showScreen('home');
+    updateSetupModeCopy();
+    if (returnToCards) openCardCenter();
+    else showScreen('home');
   }
 
   function selectedTargetMode() {
@@ -347,8 +435,10 @@
     nasPanel.classList.toggle('target-disabled', !requiresNas);
     byId('localTarget').disabled = !requiresLocal;
     byId('nasMappedTarget').disabled = !requiresNas;
-    localPanel.querySelector('button').disabled = !requiresLocal;
-    nasPanel.querySelector('button').disabled = !requiresNas;
+    localPanel.querySelectorAll('button').forEach(button => { button.disabled = !requiresLocal; });
+    nasPanel.querySelectorAll('[data-picker]').forEach(button => { button.disabled = !requiresNas; });
+    const nasTestButton = byId('nasTestBtn');
+    if (nasTestButton) nasTestButton.disabled = !requiresNas || nasTestInFlight;
   }
 
   function validateTargetSettings() {
@@ -377,11 +467,7 @@
     const sources = defaultTemplate.approvedSourceDirectories;
     const extensions = defaultTemplate.approvedExtensions;
     const targets = configuration;
-    const namingLabels = {
-      'capture-date': '拍摄日期 / 保持原目录',
-      'import-date': '导入日期 / 保持原目录',
-      preserve: '直接保持素材卡目录'
-    };
+    const namingLabel = '卡名 + 导入时间 / 仅保存新增媒体';
     byId('summaryCameraTemplates').textContent = `${templates.length} 个 · 默认：${defaultTemplate.name}`;
     byId('summarySourceCount').textContent = `${sources.length} 个 · ${sources.join('、')}`;
     byId('summaryExtensions').textContent = `${extensions.length} 种 · ${extensions.join('、')}`;
@@ -393,7 +479,8 @@
     byId('summaryTargetMode').textContent = modeLabels[targets.targetMode];
     byId('summaryLocalTarget').textContent = targets.localTarget || '未启用';
     byId('summaryNasTarget').textContent = targets.nasMappedTarget || '未启用';
-    byId('summaryNamingRule').textContent = namingLabels[byId('targetNamingRule').value] || '未选择';
+    byId('targetNamingRule').value = 'card-time-flat';
+    byId('summaryNamingRule').textContent = namingLabel;
     byId('summaryAutoStart').textContent = byId('autoStartOnLogin').checked ? '已开启' : '未开启';
   }
 
@@ -409,7 +496,8 @@
     }
 
     if (currentSetupStep === 0 || currentSetupStep === 1) captureActiveCameraTemplate();
-    currentSetupStep = Math.max(0, Math.min(3, step));
+    const lastStep = pendingManagedRebind || pendingInsertedCardSetup ? 1 : 3;
+    currentSetupStep = Math.max(0, Math.min(lastStep, step));
     document.querySelectorAll('[data-setup-step]').forEach(panel => {
       const active = Number(panel.dataset.setupStep) === currentSetupStep;
       panel.classList.toggle('active', active);
@@ -421,8 +509,8 @@
       item.classList.toggle('complete', index < currentSetupStep);
     });
     byId('setupBackBtn').style.display = currentSetupStep > 0 ? 'inline-flex' : 'none';
-    byId('setupNextBtn').style.display = currentSetupStep < 3 ? 'inline-flex' : 'none';
-    byId('setupSubmitBtn').style.display = currentSetupStep === 3 ? 'inline-flex' : 'none';
+    byId('setupNextBtn').style.display = currentSetupStep < lastStep ? 'inline-flex' : 'none';
+    byId('setupSubmitBtn').style.display = currentSetupStep === lastStep ? 'inline-flex' : 'none';
     if (currentSetupStep === 3) renderSetupSummary();
     const activePanel = document.querySelector(`[data-setup-step="${currentSetupStep}"]`);
     const focusTarget = activePanel && activePanel.querySelector('button,input,select,h2');
@@ -431,11 +519,12 @@
   }
 
   function normalizeSourceDirectory(value) {
-    const directory = safeText(value).replace(/[\\/]+$/, '');
+    const raw = safeText(value).trim();
+    const directory = raw === '.' ? '.' : raw.replace(/[\\/]+$/, '');
     if (!directory) throw new Error('请至少选择一个素材卡内的源目录。');
     if (directory.length > 240) throw new Error('批准源目录名称过长。');
     if (/^[a-z]:/i.test(directory) || directory.startsWith('\\') || directory.startsWith('/')) throw new Error('批准源目录必须来自素材卡文件夹选择器。');
-    if (directory.split(/[\\/]+/).some(part => part === '..' || part === '.')) throw new Error('批准源目录不能包含返回上级目录的写法。');
+    if (directory !== '.' && directory.split(/[\\/]+/).some(part => part === '..' || part === '.')) throw new Error('批准源目录不能包含返回上级目录的写法。');
     return directory;
   }
 
@@ -471,7 +560,7 @@
       const row = document.createElement('div');
       row.className = 'source-folder-item';
       const path = document.createElement('span');
-      path.textContent = `素材卡内 \\${directory}`;
+      path.textContent = directory === '.' ? '素材卡根目录（整张卡）' : `素材卡内 \\${directory}`;
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'selection-remove';
@@ -607,9 +696,9 @@
     const defaultTemplate = normalizedTemplates.find(template => template.templateId === defaultCameraTemplateId);
     if (!defaultTemplate) throw new Error('请选择有效的默认相机模板。');
     const { targetMode, localTarget, nasMappedTarget } = validateTargetSettings();
-    const targetNamingRule = byId('targetNamingRule').value;
+    const targetNamingRule = 'card-time-flat';
+    byId('targetNamingRule').value = targetNamingRule;
     const autoStartOnLogin = byId('autoStartOnLogin').checked;
-    if (!['capture-date', 'import-date', 'preserve'].includes(targetNamingRule)) throw new Error('目标命名规则无效。');
     const cardProfiles = latestConfiguration && Array.isArray(latestConfiguration.cardProfiles)
       ? latestConfiguration.cardProfiles
       : [];
@@ -624,6 +713,31 @@
       nasMappedTarget,
       targetNamingRule,
       autoStartOnLogin
+    };
+  }
+
+  function collectCardScopedConfiguration() {
+    captureActiveCameraTemplate();
+    const template = currentCameraTemplate();
+    if (!template || !safeText(template.templateId)) throw new Error('请选择有效的素材范围。');
+    const name = safeText(template.name);
+    if (!name) throw new Error('请为这张卡的素材范围填写名称。');
+    const directories = normalizeSourceDirectories(template.approvedSourceDirectories);
+    if (directories.length === 0) throw new Error(`请为“${name}”选择至少一个素材目录。`);
+    const extensions = [...new Set(template.approvedExtensions.map(normalizeExtension))];
+    if (extensions.length === 0) throw new Error(`请为“${name}”选择至少一种文件类型。`);
+    const selectedTemplate = {
+      templateId: template.templateId,
+      name,
+      approvedSourceDirectories: directories,
+      approvedExtensions: extensions
+    };
+    return {
+      approvedSourceDirectories: directories,
+      approvedExtensions: extensions,
+      defaultCameraTemplateId: template.templateId,
+      cameraTemplates: [selectedTemplate],
+      cardProfiles: []
     };
   }
 
@@ -670,6 +784,9 @@
           hasBaseline: card.hasBaseline === true,
           initializationPending: card.initializationPending === true,
           healthState: safeText(card.healthState, 'healthy'),
+          firstSeenUtc: safeText(card.firstSeenUtc),
+          lastSeenUtc: safeText(card.lastSeenUtc),
+          lastCompletedTaskId: safeText(card.lastCompletedTaskId),
           profile,
           template
         };
@@ -691,6 +808,9 @@
         hasBaseline: true,
         initializationPending: false,
         healthState: template ? 'healthy' : 'scope_missing',
+        firstSeenUtc: '',
+        lastSeenUtc: '',
+        lastCompletedTaskId: '',
         profile,
         template
       };
@@ -748,13 +868,14 @@
     };
     loadActiveCameraTemplate();
     renderManagedCards();
-    openSetup({ preserveManagedRebind: true, step: 0 });
+    openSetup({ preserveCardContext: true, step: 0 });
     byId('setupError').textContent =
       `正在为“${displayName}”建立独立的新素材范围。旧模板和历史记录不会被覆盖；完成设置前请插入并保持这张卡连接。`;
   }
 
-  function renderManagedCards(configuration = latestConfiguration) {
-    const list = byId('managedCardList');
+  function renderManagedCards(configuration = latestConfiguration, targetId = 'managedCardList') {
+    const list = byId(targetId);
+    if (!list) return;
     list.replaceChildren();
     const cards = knownCardsForConfiguration(configuration);
     if (cards.length === 0) {
@@ -768,6 +889,9 @@
     cards.forEach((card, index) => {
       const cardId = safeText(card.cardInstanceId);
       const displayName = safeText(card.displayName, cardId ? `素材卡 ${cardId.slice(0, 8)}` : `素材卡 ${index + 1}`);
+      const mounted = latestMediaStatus && latestMediaStatus.media.find(item =>
+        item.cardInstanceId === cardId && item.presenceState !== 'removed');
+      const busy = mounted && ['scanning', 'copying', 'verifying'].includes(mounted.workState);
       const directories = cardTextList(card.approvedSourceDirectories);
       const extensions = cardTextList(card.approvedExtensions);
       const row = document.createElement('article');
@@ -781,7 +905,11 @@
       const name = document.createElement('strong');
       name.textContent = displayName;
       const id = document.createElement('span');
-      id.textContent = cardId ? `CardId ${cardId.slice(0, 8)}` : '历史记录';
+      id.textContent = mounted
+        ? `${mounted.driveLetter || '当前已插入'} · ${mediaWorkLabel(mounted)}`
+        : card.lastSeenUtc
+          ? `当前未插入 · 上次识别 ${historyTimestamp(card.lastSeenUtc)}`
+          : '当前未插入';
       title.append(name, id);
       const templateName = document.createElement('p');
       templateName.textContent = card.hasProfile
@@ -814,16 +942,22 @@
         const reconfigure = document.createElement('button');
         reconfigure.type = 'button';
         reconfigure.className = 'btn secondary compact';
-        reconfigure.textContent = '调整此卡素材范围';
-        reconfigure.disabled = pendingManagedRebind !== null;
+        reconfigure.textContent = busy
+          ? '完成本次同步后可调整'
+          : mounted ? '调整这张卡的素材范围' : '插入后调整素材范围';
+        reconfigure.disabled = pendingManagedRebind !== null || !mounted || busy;
+        reconfigure.title = !mounted
+          ? '为防止修改到另一张卡，请先插入这张卡。'
+          : busy ? '复制或校验期间不能更改素材范围。' : '';
         reconfigure.addEventListener('click', () => beginManagedCardScopeEdit(card, displayName));
         actions.append(rename, reconfigure);
       } else if (cardId) {
         const recovery = document.createElement('button');
         recovery.type = 'button';
         recovery.className = 'btn secondary compact';
-        recovery.textContent = '恢复档案并调整范围';
-        recovery.disabled = pendingManagedRebind !== null;
+        recovery.textContent = mounted ? '恢复这张卡的素材范围' : '插入后恢复素材范围';
+        recovery.disabled = pendingManagedRebind !== null || !mounted || busy;
+        recovery.title = !mounted ? '请先插入这张卡，系统会核对身份后再恢复。' : '';
         recovery.addEventListener('click', () => beginManagedCardScopeEdit(card, displayName));
         actions.appendChild(recovery);
       } else {
@@ -837,9 +971,57 @@
     });
   }
 
+  function targetModeLabel(configuration) {
+    if (!configuration) return '保存位置尚未配置';
+    if (configuration.targetMode === 'local-only') return `只保存到本机 · ${safeText(configuration.localTarget, '位置待选择')}`;
+    if (configuration.targetMode === 'nas-only') return `只保存到 NAS · ${safeText(configuration.nasMappedTarget, '位置待选择')}`;
+    if (configuration.targetMode === 'local-and-nas') {
+      return `本机 ${safeText(configuration.localTarget, '待选择')} + NAS ${safeText(configuration.nasMappedTarget, '待选择')}`;
+    }
+    return '保存位置尚未配置';
+  }
+
+  function renderCardCenter() {
+    const configuration = latestConfiguration;
+    const knownCards = knownCardsForConfiguration(configuration);
+    const mounted = latestMediaStatus
+      ? latestMediaStatus.media.filter(item => item.presenceState !== 'removed')
+      : [];
+    byId('cardCenterMountedCount').textContent = String(mounted.length);
+    byId('cardCenterKnownCount').textContent = String(knownCards.length);
+    byId('cardCenterSummary').textContent = mounted.length > 0
+      ? `当前插入 ${mounted.length} 张，本机记录 ${knownCards.length} 张。需要处理的卡会直接显示下一步。`
+      : `当前没有插卡，本机记录 ${knownCards.length} 张。插入任意卡后会立即识别并更新这里。`;
+    byId('cardCenterTargetSummary').textContent = targetModeLabel(configuration);
+
+    const mountedList = byId('cardCenterMountedList');
+    mountedList.replaceChildren();
+    if (mounted.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'card-center-empty';
+      empty.innerHTML = '<strong>等待插入素材卡</strong><span>插卡后不需要进入设置，识别结果和可执行操作会直接出现在这里。</span>';
+      mountedList.appendChild(empty);
+    } else {
+      mounted.forEach(item => mountedList.appendChild(renderMediaCard(
+        item,
+        latestMediaStatus ? latestMediaStatus.activeMountSessionId : '')));
+    }
+    renderManagedCards(configuration, 'cardCenterKnownList');
+  }
+
+  function openCardCenter() {
+    if (!(latestConfiguration && latestConfiguration.configured === true)) {
+      openSetup({ firstRun: true });
+      return;
+    }
+    renderCardCenter();
+    showScreen('cards');
+  }
+
   function submitSetup(event) {
     event.preventDefault();
-    if (currentSetupStep < 3) {
+    const lastStep = pendingManagedRebind || pendingInsertedCardSetup ? 1 : 3;
+    if (currentSetupStep < lastStep) {
       showSetupStep(currentSetupStep + 1, true);
       return;
     }
@@ -850,15 +1032,13 @@
       return;
     }
     try {
-      const configuration = collectConfiguration();
+      const cardScopedOperation = pendingManagedRebind !== null || pendingInsertedCardSetup !== null;
+      const configuration = cardScopedOperation
+        ? collectCardScopedConfiguration()
+        : collectConfiguration();
       let type = 'configuration.save';
       let payload = configuration;
       if (pendingManagedRebind) {
-        const confirmed = window.confirm(
-          `请确认当前插入并保持连接的介质就是“${pendingManagedRebind.displayName}”。` +
-          '系统会保留旧任务、回执和清理前基线快照，再把这张卡绑定到新素材范围。' +
-          '当前符合新范围的文件会重新检查，必要时重新复制，因此可能产生重复副本。确定继续吗？');
-        if (!confirmed) return;
         type = 'card.profile.configure';
         payload = {
           configuration,
@@ -866,9 +1046,21 @@
           cameraTemplateId: pendingManagedRebind.cameraTemplateId,
           confirmed: true
         };
+      } else if (pendingInsertedCardSetup) {
+        type = 'card.initialize';
+        payload = {
+          configuration,
+          mountSessionId: pendingInsertedCardSetup.mountSessionId,
+          cameraTemplateId: activeCameraTemplateId,
+          confirmed: true,
+          registerExistingOnly: true
+        };
       }
       byId('setupSubmitBtn').disabled = true;
-      const requestId = postCommand(type, payload, { configuration });
+      const requestId = postCommand(type, payload, {
+        configuration,
+        returnToCardCenter: pendingManagedRebind !== null || pendingInsertedCardSetup !== null
+      });
       if (!requestId) byId('setupSubmitBtn').disabled = hasPendingSensitiveOperation();
     } catch (exception) {
       error.textContent = exception instanceof Error ? exception.message : '设置内容无效。';
@@ -907,7 +1099,7 @@
       updateTargetModeUi();
       if (typeof configuration.localTarget === 'string') byId('localTarget').value = configuration.localTarget;
       if (typeof configuration.nasMappedTarget === 'string') byId('nasMappedTarget').value = configuration.nasMappedTarget;
-      if (['capture-date', 'import-date', 'preserve'].includes(configuration.targetNamingRule)) byId('targetNamingRule').value = configuration.targetNamingRule;
+      byId('targetNamingRule').value = 'card-time-flat';
       if (typeof configuration.autoStartOnLogin === 'boolean') byId('autoStartOnLogin').checked = configuration.autoStartOnLogin;
     }
     if (!configured) {
@@ -924,6 +1116,7 @@
       if (currentScreen === 'setup') showScreen('home');
     }
     if (currentScreen === 'home') applyMediaHomeNarrative();
+    if (currentScreen === 'cards') renderCardCenter();
   }
 
   function formatBytes(value) {
@@ -1091,6 +1284,173 @@
     metricRenderTimer = 0;
   }
 
+  function historyTargetLabel(record) {
+    const mode = safeText(record.targetMode || record.target);
+    if (mode === 'local-and-nas') return '本地 + NAS';
+    if (mode === 'local-only') return '本地';
+    if (mode === 'nas-only') return 'NAS';
+    if (Array.isArray(record.targets)) {
+      const hasLocal = record.targets.some(item => isPlainObject(item) && item.kind === 'local');
+      const hasNas = record.targets.some(item => isPlainObject(item) && item.kind === 'mappedNas');
+      if (hasLocal && hasNas) return '本地 + NAS';
+      if (hasLocal) return '本地';
+      if (hasNas) return 'NAS';
+    }
+    return '目标未记录';
+  }
+
+  function historyTimestamp(value) {
+    const valueText = safeText(value);
+    if (!valueText) return '时间未记录';
+    const date = new Date(valueText);
+    if (Number.isNaN(date.getTime())) return valueText;
+    return date.toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
+  }
+
+  function normalizeHistoryRecord(value) {
+    if (!isPlainObject(value)) return null;
+    const status = safeText(value.status || value.state || value.outcome).toLowerCase();
+    const safe = value.safeToRemoveCard === true
+      || value.safe === true
+      || value.success === true
+      || ['complete', 'completed', 'safe', 'success'].includes(status);
+    return {
+      cardName: safeText(value.cardDisplayName || value.cardName || value.mediaLabel || value.cardLabel, '素材卡'),
+      timestamp: historyTimestamp(value.completedAt || value.finishedAt || value.timestamp || value.createdAt),
+      fileCount: nullableNonNegativeNumber(value.fileCount ?? value.totalFiles ?? value.selectedFileCount),
+      bytes: nullableNonNegativeNumber(value.totalBytes ?? value.selectedBytes ?? value.bytes),
+      targetMode: historyTargetLabel(value),
+      safe
+    };
+  }
+
+  function historyRecords(data) {
+    const rows = Array.isArray(data)
+      ? data
+      : isPlainObject(data)
+        ? [data.records, data.items, data.history].find(Array.isArray) || []
+        : [];
+    return rows.map(normalizeHistoryRecord).filter(Boolean);
+  }
+
+  function setHistoryLoading(loading, message = '') {
+    historyLoading = loading;
+    const refresh = byId('historyRefreshBtn');
+    refresh.disabled = loading;
+    byId('historyDescription').textContent = message || (loading ? '正在读取本机同步记录…' : '同步记录只显示卡名、时间、文件数、大小和保存目标。');
+    if (loading) byId('historyList').replaceChildren();
+  }
+
+  function renderHistory(data) {
+    latestHistory = historyRecords(data);
+    setHistoryLoading(false, latestHistory.length > 0
+      ? '共 ' + latestHistory.length + ' 条本机同步记录。'
+      : '尚无可显示的本机同步记录。');
+    const list = byId('historyList');
+    list.replaceChildren();
+    if (latestHistory.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'history-empty';
+      empty.textContent = '尚无同步历史。完成一次安全同步后，这里会显示摘要记录。';
+      list.appendChild(empty);
+      return;
+    }
+    latestHistory.forEach(record => {
+      const row = document.createElement('article');
+      row.className = 'history-record' + (record.safe ? '' : ' unsafe');
+      const copy = document.createElement('div');
+      copy.className = 'history-record-copy';
+      const name = document.createElement('strong');
+      name.textContent = record.cardName;
+      const time = document.createElement('span');
+      time.textContent = record.timestamp;
+      const detail = document.createElement('span');
+      const files = record.fileCount === null ? '文件数未记录' : Math.floor(record.fileCount) + ' 个文件';
+      const bytes = record.bytes === null ? '大小未记录' : formatBytes(record.bytes);
+      detail.textContent = files + ' · ' + bytes + ' · ' + record.targetMode;
+      copy.append(name, time, detail);
+      const state = document.createElement('span');
+      state.className = 'history-record-status';
+      state.textContent = record.safe ? '已安全完成' : '未安全完成';
+      row.append(copy, state);
+      list.appendChild(row);
+    });
+  }
+
+  function renderHistoryError(message) {
+    setHistoryLoading(false, safeText(message, '无法读取本机同步记录。'));
+    const list = byId('historyList');
+    list.replaceChildren();
+    const empty = document.createElement('div');
+    empty.className = 'history-empty';
+    empty.textContent = '暂时无法读取历史。请检查桌面应用连接后重新读取。';
+    list.appendChild(empty);
+  }
+
+  function requestHistory() {
+    setHistoryLoading(true);
+    const requestId = postCommand('history.get');
+    if (!requestId) renderHistoryError('桌面应用连接不可用，无法读取历史。');
+  }
+
+  function openHistory() {
+    openOverlay('historySheet', 'historyRefreshBtn');
+    requestHistory();
+  }
+
+  function setNasTestResult(message, state = '') {
+    const result = byId('nasTestResult');
+    result.hidden = !message;
+    result.textContent = safeText(message);
+    if (state) result.dataset.state = state;
+    else delete result.dataset.state;
+  }
+
+  function renderNasTest(data, message) {
+    const details = isPlainObject(data) ? data : {};
+    const available = nullableNonNegativeNumber(details.availableBytes ?? details.freeBytes ?? details.availableSpaceBytes);
+    const prefix = safeText(message, 'NAS 连接可用');
+    setNasTestResult(available === null ? prefix : prefix + ' · 可用空间 ' + formatBytes(available), 'success');
+  }
+
+  function testNasConnection() {
+    try {
+      const selectedPath = normalizeWindowsPath(byId('nasMappedTarget').value);
+      if (!isDrivePath(selectedPath)) throw new Error('请先选择已连接的 NAS 映射盘文件夹。');
+      nasTestInFlight = true;
+      byId('nasTestBtn').disabled = true;
+      setNasTestResult('正在测试 NAS 连接…', 'testing');
+      const requestId = postCommand('storage.test', { purpose: 'nasMappedTarget', path: selectedPath }, { path: selectedPath });
+      if (!requestId) {
+        nasTestInFlight = false;
+        byId('nasTestBtn').disabled = false;
+        setNasTestResult('桌面应用连接不可用，未保存设置也未执行测试。', 'error');
+      }
+    } catch (exception) {
+      setNasTestResult(exception instanceof Error ? exception.message : 'NAS 路径无效。', 'error');
+    }
+  }
+
+  function taskIsRunning() {
+    return currentScreen === 'task' || (latestStatus && latestStatus.view === 'copying');
+  }
+
+  function requestExit() {
+    byId('exitConfirmMessage').textContent = taskIsRunning()
+      ? '当前同步正在运行。完全退出会停止本次任务，未完成的目标不会被显示为安全完成。'
+      : '完全退出会关闭桌面应用。';
+    openOverlay('exitConfirmSheet', 'exitConfirmBtn');
+  }
+
+  function confirmExit() {
+    byId('exitConfirmBtn').disabled = true;
+    const requestId = postCommand('window.exit');
+    if (!requestId) {
+      byId('exitConfirmBtn').disabled = false;
+      showToast('桌面应用连接不可用，未执行完全退出。');
+    }
+  }
+
   function renderHostReady() {
     byId('hostDot').classList.remove('offline', 'connecting');
     byId('hostLabel').textContent = '桌面应用已就绪';
@@ -1106,6 +1466,10 @@
     return Number.isFinite(value) && value >= 0 ? value : fallback;
   }
 
+  function nullableNonNegativeNumber(value) {
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
   function normalizeMediaItem(value) {
     if (!isPlainObject(value)) return null;
     const queuePosition = Number.isInteger(value.queuePosition) && value.queuePosition >= 0
@@ -1115,13 +1479,19 @@
       mountSessionId: safeText(value.mountSessionId),
       volumeKey: safeText(value.volumeKey),
       driveLetter: safeText(value.driveLetter),
+      volumeLabel: safeText(value.volumeLabel),
       fileSystem: safeText(value.fileSystem),
       capacityBytes: nonNegativeNumber(value.capacityBytes),
+      selectedFileCount: nullableNonNegativeNumber(value.selectedFileCount),
+      deltaFileCount: nullableNonNegativeNumber(value.deltaFileCount),
+      selectedBytes: nullableNonNegativeNumber(value.selectedBytes),
+      deltaBytes: nullableNonNegativeNumber(value.deltaBytes),
       presenceState: safeText(value.presenceState, 'detecting'),
       eligibilityState: safeText(value.eligibilityState, 'checking'),
       identityState: safeText(value.identityState, 'unknown'),
       cardInstanceId: safeText(value.cardInstanceId),
       cardDisplayName: safeText(value.cardDisplayName),
+      cameraTemplateId: safeText(value.cameraTemplateId),
       expectedDirectories: normalizeMediaTextList(value.expectedDirectories),
       observedCandidateDirectories: normalizeMediaTextList(value.observedCandidateDirectories),
       workState: safeText(value.workState, 'awaiting_action'),
@@ -1130,6 +1500,7 @@
       reasonCode: safeText(value.reasonCode),
       primaryAction: safeText(value.primaryAction),
       availableActions: normalizeMediaTextList(value.availableActions),
+      lastCompletedAtUtc: safeText(value.lastCompletedAtUtc),
       overallPercent: clampPercent(nonNegativeNumber(value.overallPercent)),
       detail: safeText(value.detail)
     };
@@ -1157,6 +1528,8 @@
 
   function mediaNeedsAttention(item) {
     if (item.presenceState === 'detecting' || item.eligibilityState === 'checking' || item.identityState === 'unknown') return false;
+    if (mediaIsComplete(item)) return false;
+    if (item.workState === 'deferred') return false;
     if (mediaHasAction(item, 'configure_card_scope') || mediaHasAction(item, 'defer_current_card')) return true;
     if (['awaiting_action', 'needs_confirmation', 'blocked', 'recovery_required', 'failed'].includes(item.workState)) return true;
     return ['needs_confirmation', 'conflict', 'legacy_profile_missing', 'recovery_required'].includes(item.identityState)
@@ -1167,7 +1540,7 @@
     if (item.presenceState === 'removed') return 'current';
     if (mediaNeedsAttention(item)) return 'attention';
     if (mediaIsComplete(item)) return 'completed';
-    if ((item.queuePosition !== null && item.queuePosition > 0) || item.workState === 'queued') return 'queued';
+    if ((item.queuePosition !== null && item.queuePosition > 0) || ['queued', 'deferred'].includes(item.workState)) return 'queued';
     return 'current';
   }
 
@@ -1209,6 +1582,7 @@
       detecting: '正在检测',
       awaiting_action: '等待你的决定',
       queued: '等待处理',
+      deferred: '已暂缓，等待队列',
       scanning: '正在扫描',
       copying: '正在保存',
       verifying: '正在完整校验',
@@ -1257,7 +1631,10 @@
   function mediaDetailText(item) {
     if (mediaIsComplete(item)) return mediaCompletionMessage(item);
     const parts = [mediaIdentityLabel(item), mediaEligibilityLabel(item), mediaWorkLabel(item)];
-    if (item.queuePosition !== null && item.queuePosition > 0) parts.push(`队列第 ${item.queuePosition} 位`);
+    if (item.queuePosition !== null && item.queuePosition > 0) {
+      parts.push('队列第 ' + item.queuePosition + ' 位（一次只处理一张）');
+    }
+    if (item.workState === 'deferred') parts.push('此卡已暂缓，队列会继续处理其他卡');
     if (item.detail) parts.push(item.detail);
     return [...new Set(parts)].join(' · ');
   }
@@ -1280,6 +1657,105 @@
     actions.appendChild(button);
   }
 
+  function closeCardDecision() {
+    pendingCardDecision = null;
+    closeOverlay('cardDecisionSheet');
+  }
+
+  function requestCardDecision(options) {
+    pendingCardDecision = {
+      command: options.command,
+      payload: options.payload
+    };
+    byId('cardDecisionTitle').textContent = options.title;
+    byId('cardDecisionMessage').textContent = options.message;
+    byId('cardDecisionDetail').textContent = options.detail;
+    byId('cardDecisionConfirmBtn').textContent = options.confirmLabel;
+    openOverlay('cardDecisionSheet', 'cardDecisionConfirmBtn');
+  }
+
+  function confirmCardDecision() {
+    const decision = pendingCardDecision;
+    closeCardDecision();
+    if (decision) postCommand(decision.command, decision.payload);
+  }
+
+  function recoveryMedia(item = null) {
+    if (item && item.mountSessionId) return item;
+    if (!latestMediaStatus) return null;
+    const active = latestMediaStatus.media.find(value =>
+      value.mountSessionId && value.mountSessionId === latestMediaStatus.activeMountSessionId);
+    return active || selectedMediaForHome(latestMediaStatus);
+  }
+
+  function performCardAction(item, action) {
+    const media = recoveryMedia(item);
+    if (!media || !media.mountSessionId) {
+      showToast('这张素材卡已移除或状态已变化，请刷新后重试');
+      return;
+    }
+    const target = { mountSessionId: media.mountSessionId };
+    if (action === 'configure_card_scope') {
+      configureMediaScope(media);
+      return;
+    }
+    if (action === 'defer_current_card' || action === 'ignore_this_mount') {
+      postCommand('media.defer', target);
+      return;
+    }
+    if (action === 'prioritize') {
+      postCommand('media.prioritize', target);
+      return;
+    }
+    if (action === 'retry') {
+      postCommand('task.retry', target);
+      return;
+    }
+    if (action === 'restart_fresh') {
+      requestCardDecision({
+        command: 'task.restartFresh',
+        payload: { ...target, confirmed: true },
+        title: '保留旧记录并重新检查？',
+        message: `AutoCardSync 会为“${mediaCardName(media)}”重新建立本次任务，不会删除旧记录或目标副本。`,
+        detail: '如果已有同名素材，系统会安全区分文件；源卡始终只读。新任务仍需完成所选目标的完整校验。',
+        confirmLabel: '保留记录并重新检查'
+      });
+      return;
+    }
+    if (action === 'reassociate_card') {
+      requestCardDecision({
+        command: 'card.reassociate',
+        payload: { ...target, confirmed: true },
+        title: '确认这是同一张卡？',
+        message: '适用于只更换了读卡器、盘符或连接端口，卡内素材仍属于原来的拍摄卡。',
+        detail: '系统会保留历史导入边界并重新检查新增素材，不会把当前内容直接算作已导入。',
+        confirmLabel: '这是同一张卡'
+      });
+      return;
+    }
+    if (action === 'treat_as_new_card') {
+      requestCardDecision({
+        command: 'card.reinitialize',
+        payload: { ...target, confirmed: true },
+        title: '这张卡已经重新使用？',
+        message: '适用于卡已格式化、换相机使用，或你明确希望从当前内容重新建立导入边界。',
+        detail: '旧任务、回执和历史基线会保留；当前批准范围会重新检查，必要时重新复制。源卡不会被写入。',
+        confirmLabel: '按重新使用的卡处理'
+      });
+      return;
+    }
+    if (action === 'confirm_source_cleanup') {
+      requestCardDecision({
+        command: 'card.confirmSourceCleanup',
+        payload: { ...target, confirmed: true },
+        title: '这些旧素材是你清理的吗？',
+        message: '只有当历史文件确实由你主动删除、在相机中清理或格式化后不再存在时才继续。',
+        detail: '系统会保留清理前快照，再检查当前全部素材；不会删除任何目标副本，也不会写入源卡。',
+        confirmLabel: '是我主动清理的'
+      });
+    }
+  }
+
   function configureMediaScope(item) {
     const knownCard = item.cardInstanceId
       ? knownCardsForConfiguration(latestConfiguration).find(card =>
@@ -1289,7 +1765,106 @@
       beginManagedCardScopeEdit(knownCard, mediaCardName(item));
       return;
     }
-    openSetup({ step: 0 });
+    if (!latestConfiguration) {
+      showToast('正在读取本机设置，请刷新后重试');
+      return;
+    }
+    captureActiveCameraTemplate();
+    const source = currentCameraTemplate();
+    const existingNames = new Set(cameraTemplates.map(template =>
+      safeText(template.name).toLocaleLowerCase('zh-CN')));
+    const baseName = `${mediaCardName(item)} 素材范围`.slice(0, 58);
+    let templateName = baseName;
+    let sequence = 2;
+    while (existingNames.has(templateName.toLocaleLowerCase('zh-CN'))) {
+      templateName = `${baseName} ${sequence}`.slice(0, 64);
+      sequence += 1;
+    }
+    const template = {
+      templateId: newRequestId(),
+      name: templateName,
+      approvedSourceDirectories: [],
+      approvedExtensions: source && source.approvedExtensions.length > 0
+        ? [...source.approvedExtensions]
+        : ['.jpg', '.jpeg', '.mp4', '.mov']
+    };
+    cameraTemplates.push(template);
+    activeCameraTemplateId = template.templateId;
+    loadActiveCameraTemplate();
+    pendingInsertedCardSetup = {
+      mountSessionId: item.mountSessionId,
+      displayName: mediaCardName(item)
+    };
+    openSetup({ step: 0, preserveCardContext: true });
+  }
+
+  function isRecognizingMedia(item) {
+    return item.presenceState === 'detecting'
+      || item.eligibilityState === 'checking'
+      || item.identityState === 'unknown'
+      || item.workState === 'detecting';
+  }
+
+  function recognitionStepState(item, step) {
+    const cardRead = item.presenceState !== 'detecting' && item.presenceState !== 'removed';
+    const cardMatched = cardRead && item.identityState !== 'unknown';
+    const taskReady = cardMatched
+      && item.eligibilityState !== 'checking'
+      && !['detecting', 'awaiting_action', 'queued', 'deferred'].includes(item.workState);
+    const done = step === 0 ? cardRead : step === 1 ? cardMatched : taskReady;
+    if (done) return 'complete';
+    const current = step === 0 || (step === 1 && cardRead) || (step === 2 && cardMatched);
+    return current ? 'current' : 'pending';
+  }
+
+  function renderRecognitionSteps(article, item) {
+    if (!isRecognizingMedia(item)) return;
+    const labels = ['读取卡信息', '匹配已知卡', '准备任务'];
+    const steps = document.createElement('div');
+    steps.className = 'recognition-steps';
+    steps.setAttribute('aria-label', '素材卡识别进度');
+    labels.forEach((label, index) => {
+      const state = recognitionStepState(item, index);
+      const node = document.createElement('span');
+      node.className = 'recognition-step recognition-step--' + state;
+      const icon = document.createElement('i');
+      icon.textContent = state === 'complete' ? '✓' : state === 'current' ? '•' : String(index + 1);
+      const copy = document.createElement('span');
+      copy.textContent = label;
+      node.append(icon, copy);
+      steps.appendChild(node);
+    });
+    const note = document.createElement('small');
+    note.className = 'recognition-note';
+    note.textContent = '首次识别可能需要几秒，请保持素材卡连接。';
+    article.append(steps, note);
+  }
+
+  function renderMediaPreview(article, item) {
+    const newFiles = item.deltaFileCount;
+    const newBytes = item.deltaBytes;
+    const selectedFiles = item.selectedFileCount;
+    const selectedBytes = item.selectedBytes;
+    const preview = document.createElement('div');
+    preview.className = 'media-card-preview';
+    const title = document.createElement('strong');
+    title.textContent = '快速预览';
+    const detail = document.createElement('span');
+    if (newFiles !== null && newBytes !== null) {
+      detail.textContent = '本次新增 ' + Math.floor(newFiles) + ' 个文件，约 ' + formatBytes(newBytes);
+    } else if (newFiles !== null) {
+      detail.textContent = '本次新增 ' + Math.floor(newFiles) + ' 个文件，大小仍在统计';
+    } else if (newBytes !== null) {
+      detail.textContent = '本次新增文件数仍在统计，约 ' + formatBytes(newBytes);
+    } else if (selectedFiles !== null && selectedBytes !== null) {
+      detail.textContent = '已选范围 ' + Math.floor(selectedFiles) + ' 个文件，约 ' + formatBytes(selectedBytes) + '；新增部分仍在统计';
+    } else if (selectedFiles !== null) {
+      detail.textContent = '已选范围 ' + Math.floor(selectedFiles) + ' 个文件；新增文件和大小仍在统计';
+    } else {
+      detail.textContent = '新文件数和估算大小仍在统计';
+    }
+    preview.append(title, detail);
+    article.appendChild(preview);
   }
 
   function renderMediaCard(item, activeMountSessionId) {
@@ -1314,6 +1889,7 @@
     const metaParts = [];
     if (item.fileSystem) metaParts.push(item.fileSystem);
     if (item.capacityBytes > 0) metaParts.push(formatBytes(item.capacityBytes));
+    if (item.lastCompletedAtUtc) metaParts.push(`上次完成 ${historyTimestamp(item.lastCompletedAtUtc)}`);
     metaParts.push(mediaSafetyLabel(item));
     meta.textContent = metaParts.join(' · ');
 
@@ -1321,6 +1897,8 @@
     detail.className = 'media-card-detail';
     detail.textContent = mediaDetailText(item);
     article.append(header, meta, detail);
+    renderRecognitionSteps(article, item);
+    renderMediaPreview(article, item);
 
     const scope = mediaScopeLabel(item);
     if (scope && !mediaIsComplete(item)) {
@@ -1346,11 +1924,35 @@
     const actions = document.createElement('div');
     actions.className = 'media-card-actions';
     const actionNames = [...new Set([item.primaryAction, ...item.availableActions].filter(Boolean))];
-    if (actionNames.includes('configure_card_scope')) {
-      appendMediaAction(actions, '调整素材范围', () => configureMediaScope(item), true);
+    const labels = {
+      configure_card_scope: '重新选择这张卡的素材位置',
+      defer_current_card: '暂缓此卡，继续其他卡',
+      ignore_this_mount: '暂不处理这张卡',
+      prioritize: '下一张处理',
+      retry: '重新检查并继续',
+      restart_fresh: '保留记录并重新检查',
+      reassociate_card: '这是同一张卡',
+      treat_as_new_card: '这张卡已重新使用',
+      confirm_source_cleanup: '这些文件是我清理的'
+    };
+    actionNames.forEach(action => {
+      if (!labels[action]) return;
+      appendMediaAction(
+        actions,
+        labels[action],
+        () => performCardAction(item, action),
+        action === item.primaryAction);
+    });
+    if (item.mountSessionId && (mediaCategory(item) === 'queued' || item.workState === 'deferred') &&
+      !actionNames.includes('prioritize')) {
+      appendMediaAction(actions, '下一张处理', () => performCardAction(item, 'prioritize'));
     }
-    if (actionNames.includes('defer_current_card')) {
-      appendMediaAction(actions, '暂缓此卡', () => postCommand('media.defer', { mountSessionId: item.mountSessionId }));
+    if (latestStatus && latestStatus.view === 'copying' &&
+      latestMediaStatus && item.mountSessionId === latestMediaStatus.activeMountSessionId) {
+      appendMediaAction(actions, '查看当前进度', () => renderCopying(latestStatus), actions.childElementCount === 0);
+    }
+    if (mediaIsComplete(item)) {
+      appendMediaAction(actions, '查看此次导入', openHistory, actions.childElementCount === 0);
     }
     if (actionNames.includes('refresh') || (mediaNeedsAttention(item) && actions.childElementCount === 0)) {
       appendMediaAction(actions, '刷新状态', () => postCommand('status.refresh'));
@@ -1418,8 +2020,11 @@
       byId('mediaStatusTitle').textContent = '未检测到已插入的外接素材卡';
       byId('mediaStatusSummary').textContent = '插卡后会先说明它是新卡、已认识的卡，还是需要恢复的历史卡。';
     } else {
-      byId('mediaStatusTitle').textContent = `已检测到 ${mounted.length} 张已插入的存储卡`;
-      byId('mediaStatusSummary').textContent = '每张卡都有独立状态；未处理、排队或需要决定的卡不会显示为已完成。';
+      const queuedCount = mounted.filter(item => mediaCategory(item) === 'queued').length;
+      byId('mediaStatusTitle').textContent = '已检测到 ' + mounted.length + ' 张已插入的存储卡';
+      byId('mediaStatusSummary').textContent = queuedCount > 0
+        ? '一次只处理一张素材卡，另有 ' + queuedCount + ' 张正在排队；不会并行写入。'
+        : '一次只处理一张素材卡；未处理、排队或需要决定的卡不会显示为已完成。';
     }
     const groups = { current: [], queued: [], attention: [], completed: [] };
     mounted.forEach(item => groups[mediaCategory(item)].push(item));
@@ -1427,6 +2032,7 @@
     Object.entries(groups).forEach(([name, items]) => renderMediaGroup(name, items, status.activeMountSessionId));
     applyMediaHomeNarrative();
     updateFailureDeferButton();
+    if (currentScreen === 'cards') renderCardCenter();
   }
 
   function renderWaiting(payload) {
@@ -1486,6 +2092,34 @@
     byId(`${prefix}TargetDetail`).textContent = metricDetail;
   }
 
+  function byteProgressFor(payload, targets) {
+    const processed = nullableNonNegativeNumber(payload.sourceBytesRead);
+    const directTotal = nullableNonNegativeNumber(payload.totalBytes);
+    const inferredTotal = targets
+      .map(target => {
+        const total = nullableNonNegativeNumber(target.totalBytes);
+        if (total !== null) return total;
+        const verification = nullableNonNegativeNumber(target.verificationTotalBytes);
+        return verification === null ? null : verification / 2;
+      })
+      .find(value => value !== null);
+    return { processed, total: directTotal !== null ? directTotal : inferredTotal || null };
+  }
+
+  function renderByteProgress(payload, targets) {
+    const progress = byteProgressFor(payload, targets);
+    const node = byId('byteProgress');
+    if (progress.processed === null) {
+      node.textContent = progress.total === null
+        ? '已处理大小仍在统计'
+        : '总大小 ' + formatBytes(progress.total) + '，已处理大小仍在统计';
+      return;
+    }
+    node.textContent = progress.total === null
+      ? '已从素材卡读取 ' + formatBytes(progress.processed) + '，总大小仍在统计'
+      : '已从素材卡读取 ' + formatBytes(Math.min(progress.processed, progress.total)) + ' / ' + formatBytes(progress.total);
+  }
+
   function renderCopying(payload) {
     const requiredNumbers = ['overallPercent', 'etaSeconds', 'completedFiles', 'totalFiles'];
     if (requiredNumbers.some(key => !Number.isFinite(payload[key]) || payload[key] < 0)) throw new Error('同步进度数值无效');
@@ -1512,6 +2146,7 @@
     byId('taskDescription').textContent = percent >= 100
       ? '文件复制进度已到 100%，正在等待所选目标完成临时和最终校验；现在仍不能拔卡。'
       : safeText(payload.description, '正在将批准的素材保存到所选目标。');
+    renderByteProgress(payload, targets);
     const sourceSpeed = Number.isFinite(payload.sourceBytesPerSecond) && payload.sourceBytesPerSecond > 0
       ? payload.sourceBytesPerSecond
       : Number.NaN;
@@ -1530,6 +2165,128 @@
     showScreen('task');
   }
 
+  function targetFailureLabel(target) {
+    const label = target && target.kind === 'local' ? '本地目标' : 'NAS 目标';
+    const complete = target && target.state === 'complete' && Number(target.verificationPercent) === 100;
+    return {
+      label,
+      state: complete ? '已完成完整校验' : '未完成，不能视为安全副本',
+      complete
+    };
+  }
+
+  function renderFailureTargets(targets) {
+    const panel = byId('failureTargetSummary');
+    panel.replaceChildren();
+    if (!Array.isArray(targets)) {
+      panel.hidden = true;
+      return;
+    }
+    const visible = targets.filter(target => isPlainObject(target) && ['local', 'mappedNas'].includes(target.kind));
+    if (visible.length === 0) {
+      panel.hidden = true;
+      return;
+    }
+    visible.forEach(target => {
+      const item = targetFailureLabel(target);
+      const node = document.createElement('div');
+      node.className = 'failure-target ' + (item.complete ? 'complete' : 'incomplete');
+      const label = document.createElement('span');
+      label.textContent = item.label;
+      const state = document.createElement('strong');
+      state.textContent = item.state;
+      node.append(label, state);
+      panel.appendChild(node);
+    });
+    panel.hidden = false;
+  }
+
+  function failureCategoryLabel(category) {
+    const labels = {
+      target_unavailable: '保存目标不可用',
+      target_failed: '保存目标未完成',
+      recovery_required: '需要从已验证断点恢复',
+      source_changed: '素材卡内容或身份发生变化',
+      card_changed: '素材卡内容或身份发生变化',
+      identity_changed: '素材卡内容或身份发生变化',
+      connection_lost: '连接已中断',
+      validation_failed: '完整校验未完成'
+    };
+    return labels[safeText(category)] || '可继续处理';
+  }
+
+  function normalizeActionHints(value) {
+    if (!Array.isArray(value)) return [];
+    return value.slice(0, 6).map(hint => {
+      if (typeof hint === 'string') return { action: hint, label: '' };
+      if (!isPlainObject(hint)) return null;
+      return {
+        action: safeText(hint.action || hint.code || hint.kind),
+        label: safeText(hint.label || hint.message || hint.text)
+      };
+    }).filter(Boolean);
+  }
+
+  function performFailureHint(action) {
+    if (['retry', 'resume', 'task.retry'].includes(action)) {
+      performCardAction(null, 'retry');
+      return;
+    }
+    if (['refresh', 'status.refresh'].includes(action)) {
+      postCommand('status.refresh');
+      return;
+    }
+    if (['settings', 'open_settings'].includes(action)) {
+      openSetup();
+      return;
+    }
+    if (['manage_cards', 'card.manage'].includes(action)) {
+      openCardCenter();
+      return;
+    }
+    if (['defer', 'defer_card', 'media.defer'].includes(action)) {
+      const media = activeDeferrableMedia();
+      if (media) postCommand('media.defer', { mountSessionId: media.mountSessionId });
+    }
+  }
+
+  function renderFailureActionHints(details) {
+    const panel = byId('failureActionHints');
+    const list = byId('failureActionHintList');
+    list.replaceChildren();
+    const hints = normalizeActionHints(details && details.actionHints);
+    byId('failureCategory').textContent = failureCategoryLabel(details && details.errorCategory);
+    if (hints.length === 0) {
+      panel.hidden = true;
+      return;
+    }
+    const supported = {
+      retry: '从已验证断点继续',
+      resume: '从已验证断点继续',
+      'task.retry': '从已验证断点继续',
+      refresh: '重新读取状态',
+      'status.refresh': '重新读取状态',
+      settings: '检查设置',
+      open_settings: '检查设置',
+      manage_cards: '管理素材卡',
+      'card.manage': '管理素材卡',
+      defer: '暂缓此卡并继续队列',
+      defer_card: '暂缓此卡并继续队列',
+      'media.defer': '暂缓此卡并继续队列'
+    };
+    hints.forEach(hint => {
+      const label = supported[hint.action] || hint.label;
+      if (supported[hint.action]) {
+        appendMediaAction(list, label, () => performFailureHint(hint.action));
+      } else if (label) {
+        const note = document.createElement('p');
+        note.textContent = label;
+        list.appendChild(note);
+      }
+    });
+    panel.hidden = list.childElementCount === 0;
+  }
+
   function renderFailure(
     title,
     what,
@@ -1538,7 +2295,8 @@
     canRestartFresh,
     canReinitializeCard,
     canReassociateCard,
-    canConfirmSourceCleanup) {
+    canConfirmSourceCleanup,
+    details = {}) {
     byId('failureTitle').textContent = safeText(title, '目前不能确认可以拔卡');
     byId('failureMessage').textContent = 'AutoCardSync 已停止给出成功结论，不会把部分完成或未知状态显示为安全完成。';
     byId('failureWhat').textContent = safeText(what, '桌面应用返回了无效或不完整的状态');
@@ -1548,6 +2306,9 @@
     byId('reinitializeCardBtn').hidden = canReinitializeCard !== true;
     byId('confirmSourceCleanupBtn').hidden = canConfirmSourceCleanup !== true;
     updateFailureDeferButton();
+    const fallbackTargets = latestStatus && Array.isArray(latestStatus.targets) ? latestStatus.targets : [];
+    renderFailureTargets(Array.isArray(details.targets) ? details.targets : fallbackTargets);
+    renderFailureActionHints(details);
     byId('failureNext').textContent = safeText(next, '恢复原来的连接后重试；无法确认的任务不会显示安全完成');
     showScreen('failure');
   }
@@ -1635,14 +2396,15 @@
   function renderStatus(payload) {
     currentOperationId = typeof payload?.operationId === 'string' && payload.operationId.length > 0 ? payload.operationId : null;
     if (!isPlainObject(payload) || !['waiting', 'copying', 'failure', 'complete', 'baseline'].includes(payload.view)) throw new Error('桌面状态类型无效');
+    latestStatus = payload;
     renderHostReady();
     if (isPlainObject(payload.configuration)) renderConfiguration(payload.configuration);
     // Status events continue while the user edits or submits a card-specific
     // scope. Keep that explicit workflow visible until its own response decides
     // whether to return home; otherwise a waiting/failure push hides the actual
     // save result and makes the operation appear to do nothing.
-    if (currentScreen === 'setup') {
-      latestStatus = payload;
+    if (currentScreen === 'setup' || currentScreen === 'cards' || pendingCardDecision !== null) {
+      if (currentScreen === 'cards') renderCardCenter();
       return;
     }
     if (payload.view !== 'copying') clearPendingMetricRenders();
@@ -1659,7 +2421,12 @@
         failure.canRestartFresh,
         failure.canReinitializeCard,
         failure.canReassociateCard,
-        failure.canConfirmSourceCleanup);
+        failure.canConfirmSourceCleanup,
+        {
+          targets: Array.isArray(failure.targets) ? failure.targets : payload.targets,
+          errorCategory: failure.errorCategory,
+          actionHints: failure.actionHints
+        });
     } else renderComplete(payload);
   }
 
@@ -1667,6 +2434,33 @@
     if (!isPlainObject(message.payload)) throw new Error('桌面响应内容无效');
     if (typeof message.payload.success !== 'boolean') throw new Error('桌面响应结果无效');
     return message.payload;
+  }
+
+  function handleTransientResponse(pending, response) {
+    if (pending.type === 'history.get') {
+      if (response.success) renderHistory(response.data);
+      else renderHistoryError(response.error);
+      return true;
+    }
+    if (pending.type === 'storage.test') {
+      nasTestInFlight = false;
+      const nasTest = byId('nasTestBtn');
+      if (nasTest) nasTest.disabled = false;
+      if (response.success) renderNasTest(response.data, response.message);
+      else setNasTestResult(safeText(response.error, 'NAS 连接测试失败。请检查映射盘连接后重试。'), 'error');
+      return true;
+    }
+    if (pending.type === 'window.exit') {
+      byId('exitConfirmBtn').disabled = false;
+      if (response.success) {
+        closeOverlay('exitConfirmSheet');
+        showToast(safeText(response.message, '正在完全退出 AutoCardSync。'));
+      } else {
+        showToast(safeText(response.error, '无法完全退出，请稍后重试。'));
+      }
+      return true;
+    }
+    return false;
   }
 
   function handleResponse(message) {
@@ -1680,6 +2474,7 @@
     const setupSave = SENSITIVE_COMMAND_TYPES.has(pending.type);
     if (setupSave) byId('setupSubmitBtn').disabled = false;
     if (!response.success) {
+      if (handleTransientResponse(pending, response)) return;
       const error = safeText(response.error, '桌面应用拒绝了请求。');
       if (setupSave) {
         byId('setupError').textContent = error;
@@ -1689,10 +2484,23 @@
       return;
     }
 
+    if (handleTransientResponse(pending, response)) return;
     if (pending.type === 'configuration.get' && isPlainObject(response.data)) renderConfiguration(response.data);
     if (pending.type === 'card.profile.rename' && isPlainObject(response.data)) {
       renderConfiguration(response.data, { forceFormReset: true });
       showToast(safeText(response.message, '素材卡名称已更新'));
+    }
+    if (pending.type === 'card.initialize') {
+      const configuration = isPlainObject(response.data) && isPlainObject(response.data.configuration)
+        ? response.data.configuration
+        : pending.context.configuration;
+      renderConfiguration(configuration, { forceFormReset: true });
+      setupFirstRun = false;
+      byId('app').classList.remove('first-run');
+      pendingInsertedCardSetup = null;
+      updateSetupModeCopy();
+      openCardCenter();
+      showToast(safeText(response.message, '软件初始化完成；现有素材仅登记为基线，未复制。'));
     }
     if (pending.type === 'configuration.save') {
       renderConfiguration(
@@ -1700,7 +2508,11 @@
         { forceFormReset: true });
       setupFirstRun = false;
       byId('app').classList.remove('first-run');
-      showScreen('home');
+      const returnToCardCenter = pending.context && pending.context.returnToCardCenter === true;
+      pendingInsertedCardSetup = null;
+      updateSetupModeCopy();
+      if (returnToCardCenter) openCardCenter();
+      else showScreen('home');
       showToast(safeText(response.message, '设置已保存，正在检测素材卡'));
     }
     if (pending.type === 'card.profile.configure') {
@@ -1708,10 +2520,11 @@
         ? response.data.configuration
         : { ...pending.context.configuration, configured: true };
       pendingManagedRebind = null;
+      updateSetupModeCopy();
       renderConfiguration(configuration, { forceFormReset: true });
       setupFirstRun = false;
       byId('app').classList.remove('first-run');
-      showScreen('home');
+      openCardCenter();
       showToast(safeText(response.message, '素材卡已绑定到新的素材范围'));
     }
     if (pending.type === 'picker.selectFolder') {
@@ -1735,7 +2548,8 @@
       'card.profile.reinitialize',
       'card.confirmSourceCleanup',
       'task.cancel',
-      'media.defer'
+      'media.defer',
+      'media.prioritize'
     ].includes(pending.type) && response.message) showToast(response.message);
   }
 
@@ -1769,38 +2583,47 @@
   byId('windowDragRegion').addEventListener('pointerdown', event => {
     if (event.button === 0 && !event.target.closest('button')) postCommand('window.drag');
   });
+  byId('themeToggleBtn').addEventListener('click', cycleTheme);
+  byId('historyBtn').addEventListener('click', openHistory);
+  byId('exitBtn').addEventListener('click', requestExit);
+  byId('historyRefreshBtn').addEventListener('click', requestHistory);
+  byId('nasTestBtn').addEventListener('click', testNasConnection);
+  byId('helpExitBtn').addEventListener('click', requestExit);
+  byId('exitCancelBtn').addEventListener('click', () => closeOverlay('exitConfirmSheet'));
+  byId('exitConfirmBtn').addEventListener('click', confirmExit);
   byId('helpBtn').addEventListener('click', () => openOverlay('helpSheet'));
   byId('settingsBtn').addEventListener('click', () => openSetup());
   byId('openSetupBtn').addEventListener('click', () => openSetup());
-  byId('manageCardsBtn').addEventListener('click', () => openSetup({ step: 3 }));
+  byId('manageCardsBtn').addEventListener('click', openCardCenter);
   byId('failureSettingsBtn').addEventListener('click', () => openSetup());
-  byId('failureManageCardsBtn').addEventListener('click', () => openSetup({ step: 3 }));
+  byId('failureManageCardsBtn').addEventListener('click', openCardCenter);
+  byId('cardCenterHomeBtn').addEventListener('click', () => showScreen('home'));
+  byId('cardCenterRefreshBtn').addEventListener('click', () => postCommand('status.refresh'));
+  byId('cardCenterTargetBtn').addEventListener('click', () => openSetup({ step: 2 }));
+  byId('cardDecisionCancelBtn').addEventListener('click', closeCardDecision);
+  byId('cardDecisionConfirmBtn').addEventListener('click', confirmCardDecision);
   byId('homeBtn').addEventListener('click', () => { if (!setupFirstRun) showScreen('home'); });
   byId('completeHomeBtn').addEventListener('click', () => showScreen('home'));
   byId('baselineHomeBtn').addEventListener('click', () => showScreen('home'));
   byId('refreshHomeBtn').addEventListener('click', () => postCommand('status.refresh'));
   byId('refreshMediaStatusBtn').addEventListener('click', () => postCommand('status.refresh'));
   byId('refreshTaskBtn').addEventListener('click', () => postCommand('status.refresh'));
-  byId('retryTaskBtn').addEventListener('click', () => postCommand('task.retry'));
+  byId('retryTaskBtn').addEventListener('click', () => performCardAction(null, 'retry'));
   byId('failureDeferCardBtn').addEventListener('click', () => {
     const media = activeDeferrableMedia();
     if (media) postCommand('media.defer', { mountSessionId: media.mountSessionId });
   });
   byId('restartFreshBtn').addEventListener('click', () => {
-    const confirmed = window.confirm('旧任务记录和未确认状态会被保留，不会删除。AutoCardSync 将按当前卡片内容创建新任务；这可能产生重复副本。确定继续吗？');
-    if (confirmed) postCommand('task.restartFresh', { confirmed: true });
+    performCardAction(null, 'restart_fresh');
   });
   byId('reassociateCardBtn').addEventListener('click', () => {
-    const confirmed = window.confirm('仅当这确实是同一张素材卡、只是更换了读卡器或卷端点时继续。AutoCardSync 会保留历史基线并重新检查新增或被改写的素材；不会把当前内容直接吞进新基线。确定继续吗？');
-    if (confirmed) postCommand('card.reassociate', { confirmed: true });
+    performCardAction(null, 'reassociate_card');
   });
   byId('reinitializeCardBtn').addEventListener('click', () => {
-    const confirmed = window.confirm('这会重新确认当前素材卡身份和相机模板，并保留旧任务、回执和历史基线。当前批准范围内的文件会重新检查，必要时重新复制，因此可能产生重复副本；源素材仍保持只读。确定继续吗？');
-    if (confirmed) postCommand('card.reinitialize', { confirmed: true });
+    performCardAction(null, 'treat_as_new_card');
   });
   byId('confirmSourceCleanupBtn').addEventListener('click', () => {
-    const confirmed = window.confirm('仅当这些历史文件确实由你主动删除、在相机中清理或格式化后不再存在时继续。AutoCardSync 会保留清理前的基线快照；如果卡内还有新增或修改的素材，会重新复制并完整校验当前批准范围内的全部文件，因此可能产生重复副本。不会删除目标副本。确定继续吗？');
-    if (confirmed) postCommand('card.confirmSourceCleanup', { confirmed: true });
+    performCardAction(null, 'confirm_source_cleanup');
   });
   byId('cancelTaskBtn').addEventListener('click', () => {
     byId('cancelConfirm').classList.add('open');
@@ -1844,7 +2667,11 @@
   });
   document.querySelectorAll('[data-picker]').forEach(button => button.addEventListener('click', () => {
     const fieldId = button.dataset.picker;
-    postCommand('picker.selectFolder', { purpose: fieldId }, { fieldId });
+    const cardContext = pendingManagedRebind || pendingInsertedCardSetup;
+    postCommand('picker.selectFolder', {
+      purpose: fieldId,
+      ...(cardContext && cardContext.mountSessionId ? { mountSessionId: cardContext.mountSessionId } : {})
+    }, { fieldId });
   }));
   document.querySelectorAll('[data-close-sheet]').forEach(button => button.addEventListener('click', () => closeOverlay(button.closest('.overlay').id)));
   document.addEventListener('keydown', event => {
@@ -1863,6 +2690,8 @@
     const glow = document.querySelector('.cursor-glow');
     if (glow) glow.style.transform = `translate(${event.clientX - 110}px,${event.clientY - 110}px)`;
   }, { passive: true });
+
+  applyTheme(readThemePreference());
 
   if (bridge) {
     bridge.addEventListener('message', receiveNativeMessage);

@@ -20,6 +20,16 @@ public sealed class FrozenTransferFinalizer
 {
     private readonly AtomicFilePublisher _publisher = new();
 
+    /// <summary>
+    /// Completes a content-frozen task by validating its frozen bindings, rereading source and staged targets,
+    /// publishing verified final objects, and returning the leases required for the receipt boundary.
+    /// </summary>
+    /// <remarks>
+    /// The caller must first use recovery eligibility checks to reject a changed card instance. This method then
+    /// rejects inconsistent journal, manifest, source, target mode, target identity, staged object, or expected
+    /// source hash facts. The caller must still revalidate the returned execution before it persists a completion
+    /// receipt.
+    /// </remarks>
     public async Task<FreshTransferExecution> FinalizeAsync(
         TaskManifest contentManifest,
         string sourceRoot,
@@ -93,7 +103,7 @@ public sealed class FrozenTransferFinalizer
                     StandaloneTargetFileJournal targetJournal = GetTargetJournal(fileJournal, plan.Role);
                     FrozenTargetContext targetContext = targetContexts[plan.TargetId];
                     FrozenTargetPaths paths = ResolveAndValidatePaths(
-                        contentManifest, entry, plan, targetJournal, targetContext);
+                        contentManifest, entry, journal, fileJournal, plan, targetJournal, targetContext);
                     TargetDirectoryContinuityLease directoryLease = AcquireTargetLease(targetContext, paths.FinalPath);
                     targetLeases.Add(directoryLease);
                     peakLeases = Math.Max(peakLeases, sourceLeases.Count + targetLeases.Count + publishLeases.Count);
@@ -344,13 +354,15 @@ public sealed class FrozenTransferFinalizer
     private static FrozenTargetPaths ResolveAndValidatePaths(
         TaskManifest contentManifest,
         ManifestEntry entry,
+        StandaloneTaskJournal taskJournal,
+        StandaloneFileJournal fileJournal,
         FreshTargetPlan plan,
         StandaloneTargetFileJournal journal,
         FrozenTargetContext context)
     {
-        string logicalFinalPath = CopyPathConvention.GetFinalPath(plan.TargetRoot, entry.RelativePath);
+        string logicalFinalPath = CopyPathConvention.GetFinalPath(plan.TargetRoot, taskJournal, fileJournal);
         string logicalTempPath = CopyPathConvention.GetTempPath(
-            plan.TargetRoot, entry.RelativePath, contentManifest.TaskId, entry.Id, plan.TargetId);
+            plan.TargetRoot, taskJournal, fileJournal, contentManifest.TaskId, plan.TargetId);
         string finalPath = context.StorageBinding?.MapPath(logicalFinalPath) ?? logicalFinalPath;
         string tempPath = context.StorageBinding?.MapPath(logicalTempPath) ?? logicalTempPath;
         if (!PathsEqual(journal.FinalPath ?? string.Empty, finalPath) ||

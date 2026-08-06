@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="system">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="color-scheme" content="light" />
+  <meta name="color-scheme" content="light dark" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; media-src 'none'; worker-src 'none'; manifest-src 'none'" />
   <title>AutoCardSync</title>
   <link rel="icon" href="data:," />
@@ -18,14 +18,17 @@
 <div class="app" id="app">
   <header class="titlebar" id="windowDragRegion">
     <div class="traffic" aria-label="窗口控制">
-      <button class="traffic-button close" data-command="window.close" type="button" aria-label="关闭到托盘"></button>
-      <button class="traffic-button minimize" data-command="window.minimize" type="button" aria-label="最小化到托盘"></button>
+      <button class="traffic-button close" data-command="window.close" type="button" aria-label="隐藏到托盘，不中断同步" title="隐藏到托盘，不中断同步"></button>
+      <button class="traffic-button minimize" data-command="window.minimize" type="button" aria-label="最小化窗口" title="最小化窗口"></button>
       <button class="traffic-button maximize" data-command="window.maximize" type="button" aria-label="最大化或还原"></button>
     </div>
     <div class="brand"><span class="brand-mark">A</span><span>AutoCardSync</span><span class="edition">单工作站版</span></div>
     <div class="title-actions">
-      <button class="round-btn" id="helpBtn" type="button" aria-label="查看使用说明">?</button>
-      <button class="round-btn settings-glyph" id="settingsBtn" type="button" aria-label="打开设置">⌘</button>
+      <button class="round-btn" id="helpBtn" type="button" aria-label="查看使用说明" title="查看使用说明">?</button>
+      <button class="round-btn" id="themeToggleBtn" type="button" aria-label="外观：跟随系统" aria-pressed="false" title="外观：跟随系统">◐</button>
+      <button class="round-btn" id="historyBtn" type="button" aria-label="查看同步历史" title="查看同步历史">◷</button>
+      <button class="round-btn" id="exitBtn" type="button" aria-label="完全退出 AutoCardSync" title="完全退出 AutoCardSync">⏻</button>
+      <button class="round-btn settings-glyph" id="settingsBtn" type="button" aria-label="打开设置" title="打开设置">⌘</button>
       <button class="round-btn" id="homeBtn" type="button" aria-label="返回首页">⌂</button>
     </div>
   </header>
@@ -108,6 +111,48 @@
       </div>
     </section>
 
+    <section class="screen" id="cards" aria-labelledby="cardCenterTitle" aria-hidden="true">
+      <div class="card-center-shell">
+        <header class="card-center-header glass glass-clear">
+          <div>
+            <span class="eyebrow">每张卡独立管理</span>
+            <h1 id="cardCenterTitle">素材卡中心</h1>
+            <p id="cardCenterSummary">正在读取已插入和本机记录的素材卡。</p>
+          </div>
+          <div class="card-center-header-actions">
+            <button class="btn secondary" id="cardCenterTargetBtn" type="button">修改保存位置</button>
+            <button class="btn secondary" id="cardCenterRefreshBtn" type="button">刷新卡片状态</button>
+            <button class="btn primary" id="cardCenterHomeBtn" type="button">返回首页</button>
+          </div>
+        </header>
+
+        <div class="card-center-grid">
+          <section class="card-center-panel glass glass-regular" aria-labelledby="mountedCardsTitle">
+            <div class="card-center-section-heading">
+              <div><span class="eyebrow">现在连接着</span><h2 id="mountedCardsTitle">已插入的素材卡</h2></div>
+              <span class="card-center-count" id="cardCenterMountedCount">0</span>
+            </div>
+            <p class="card-center-section-copy">插卡后会在这里说明是新卡、已认识的卡、等待处理，还是需要你决定。</p>
+            <div class="card-center-mounted-list" id="cardCenterMountedList" aria-live="polite"></div>
+          </section>
+
+          <section class="card-center-panel glass glass-regular" aria-labelledby="knownCardsTitle">
+            <div class="card-center-section-heading">
+              <div><span class="eyebrow">这台电脑认识的卡</span><h2 id="knownCardsTitle">卡片与素材范围</h2></div>
+              <span class="card-center-count" id="cardCenterKnownCount">0</span>
+            </div>
+            <p class="card-center-section-copy">名称、素材位置和文件类型都属于具体卡片；调整一张卡不会静默改动其他卡。</p>
+            <div class="managed-card-list card-center-known-list" id="cardCenterKnownList" aria-live="polite"></div>
+          </section>
+        </div>
+
+        <aside class="card-center-policy glass glass-clear" aria-label="当前保存规则">
+          <div><span class="eyebrow">所有卡的默认保存位置</span><strong id="cardCenterTargetSummary">正在读取保存位置</strong></div>
+          <p>卡片异常不会要求你改通用设置。只有保存位置本身变化时，才需要修改这里的全局位置。</p>
+        </aside>
+      </div>
+    </section>
+
     <section class="screen" id="task" aria-labelledby="taskTitleHeading" aria-hidden="true">
       <div class="task-layout standalone-task-layout">
         <section class="task-main">
@@ -124,6 +169,7 @@
                 <span>当前文件</span>
                 <strong id="currentFile">正在读取素材清单…</strong>
               </div>
+              <p class="task-byte-progress" id="byteProgress" aria-live="polite">已处理大小仍在统计</p>
               <p class="task-desc" id="taskDescription">复制达到 100% 后仍会继续完整校验。只有安全完成页明确出现时才可以拔卡。</p>
               <div class="stats standalone-stats">
                 <div class="stat"><span>素材卡读取速度</span><strong id="currentSpeed" class="metric-number">--</strong></div>
@@ -183,16 +229,21 @@
           <div class="safety-row warn"><i>!</i><strong>现在怎么做</strong><span id="failureSafety">请保持素材卡原位，不要根据进度数字拔卡</span></div>
           <div class="safety-row"><i>→</i><strong>下一步</strong><span id="failureNext">恢复原来的连接后重试；无法确认的任务不会显示安全完成</span></div>
         </div>
+        <div class="failure-target-summary" id="failureTargetSummary" aria-live="polite" hidden></div>
+        <section class="failure-action-hints" id="failureActionHints" aria-live="polite" hidden>
+          <strong id="failureCategory">可继续处理</strong>
+          <div id="failureActionHintList"></div>
+        </section>
         <div class="state-actions">
-          <button class="btn secondary" data-command="window.close" type="button">关闭到托盘</button>
-          <button class="btn secondary" id="failureSettingsBtn" type="button">检查设置</button>
+          <button class="btn secondary" data-command="window.close" type="button" title="隐藏到托盘，不中断同步">关闭到托盘</button>
+          <button class="btn secondary" id="failureSettingsBtn" type="button">检查保存位置</button>
           <button class="btn secondary" id="failureManageCardsBtn" type="button">管理素材卡</button>
-          <button class="btn secondary" id="restartFreshBtn" type="button" hidden>保留旧记录并重新开始</button>
-          <button class="btn secondary" id="reassociateCardBtn" type="button" hidden>这是同一张卡，继续检查新增</button>
-          <button class="btn secondary" id="reinitializeCardBtn" type="button" hidden>作为新卡重新初始化</button>
+          <button class="btn secondary" id="restartFreshBtn" type="button" hidden>保留旧证据并重新开始</button>
+          <button class="btn secondary" id="reassociateCardBtn" type="button" hidden>这是同一张卡，继续使用</button>
+          <button class="btn secondary" id="reinitializeCardBtn" type="button" hidden>这张卡已重新使用</button>
           <button class="btn secondary" id="confirmSourceCleanupBtn" type="button" hidden>这些文件是我主动清理的</button>
           <button class="btn secondary" id="failureDeferCardBtn" type="button" hidden>暂缓此卡并处理其他卡</button>
-          <button class="btn primary" id="retryTaskBtn" type="button">重新检查并恢复</button>
+          <button class="btn primary" id="retryTaskBtn" type="button">从已验证断点继续</button>
         </div>
       </article></div>
     </section>
@@ -221,9 +272,9 @@
         <aside class="onboarding-rail glass glass-regular">
           <div class="onboarding-intro">
             <span class="onboarding-mark">A</span>
-            <span class="eyebrow">第一次使用 · 约 2 分钟</span>
+            <span class="eyebrow" id="setupEyebrow">第一次使用 · 约 2 分钟</span>
             <h1 id="setupTitle">让插卡后的工作自动完成。</h1>
-            <p>跟着四个简单步骤选择素材范围和两个保存位置。完成后 AutoCardSync 会常驻托盘，插卡即开始。</p>
+            <p id="setupIntro">跟着四个简单步骤选择素材范围和保存位置。完成后 AutoCardSync 会常驻托盘，插卡即开始。</p>
           </div>
           <ol class="setup-progress" id="setupProgress" aria-label="首次配置进度">
             <li class="active" data-setup-progress="0"><span>1</span><div><strong>素材文件夹</strong><small>从素材卡中选择</small></div></li>
@@ -284,7 +335,7 @@
               </div>
               <div class="destination-stack">
                 <label class="destination-card field path-field" data-target-panel="local"><span class="destination-index">本</span><div><strong>本地保存位置</strong><small>这台电脑上的工作目录</small><div class="field-action-row"><input id="localTarget" type="text" spellcheck="false" autocomplete="off" placeholder="例如：F:\素材备份" /><button class="btn secondary compact" type="button" data-picker="localTarget">选择文件夹</button></div></div></label>
-                <label class="destination-card field path-field" data-target-panel="nas"><span class="destination-index team">NAS</span><div><strong>NAS 保存位置</strong><small>Windows 中已经连接好的 NAS 映射盘</small><div class="field-action-row"><input id="nasMappedTarget" type="text" spellcheck="false" autocomplete="off" placeholder="例如：Z:\团队素材" /><button class="btn secondary compact" type="button" data-picker="nasMappedTarget">选择文件夹</button></div></div></label>
+                <label class="destination-card field path-field" data-target-panel="nas"><span class="destination-index team">NAS</span><div><strong>NAS 保存位置</strong><small>Windows 中已经连接好的 NAS 映射盘</small><div class="field-action-row"><input id="nasMappedTarget" type="text" spellcheck="false" autocomplete="off" placeholder="例如：Z:\团队素材" /><button class="btn secondary compact" type="button" data-picker="nasMappedTarget">选择文件夹</button><button class="btn secondary compact" id="nasTestBtn" type="button" data-nas-test>测试连接</button></div><p class="nas-test-result" id="nasTestResult" role="status" aria-live="polite" hidden></p></div></label>
               </div>
               <div class="setup-note"><strong>完整性规则不会因单目标而降低</strong><span>每个被选择的目标都必须完成临时对象完整校验、原子发布和最终路径完整校验；复制到 100% 仍不代表可以拔卡。</span></div>
             </div>
@@ -292,7 +343,7 @@
             <div class="setup-step" data-setup-step="3" aria-hidden="true">
               <div class="wizard-step-head"><span class="eyebrow">第 4 步 / 共 4 步</span><h2>确认设置，然后交给 AutoCardSync</h2><p>以后登录 Windows 后应用会在托盘中等待。素材卡插入后，不需要再点“开始”。</p></div>
               <div class="finish-options">
-                <label class="field naming-field"><span>目标命名规则</span><select id="targetNamingRule" required><option value="capture-date">拍摄日期 / 保持原目录</option><option value="import-date">导入日期 / 保持原目录</option><option value="preserve">直接保持素材卡目录</option></select></label>
+                <label class="field naming-field"><span>目标命名规则</span><strong>卡名 + 导入时间 / 仅保存新增媒体</strong><input id="targetNamingRule" type="hidden" value="card-time-flat" /></label>
                 <label class="toggle-card" for="autoStartOnLogin"><span><strong>登录后自动运行</strong><small>AutoCardSync 会在托盘中安静等待插卡</small></span><input id="autoStartOnLogin" type="checkbox" checked /><i aria-hidden="true"></i></label>
               </div>
               <div class="setup-summary" aria-label="设置摘要">
@@ -301,7 +352,7 @@
                 <div><span>文件类型</span><strong id="summaryExtensions">尚未选择</strong></div>
                 <div><span>保存方式</span><strong id="summaryTargetMode">只保存到 NAS</strong></div><div><span>本地目标</span><strong id="summaryLocalTarget">未启用</strong></div>
                 <div><span>NAS 目标</span><strong id="summaryNasTarget">尚未选择</strong></div>
-                <div><span>目录规则</span><strong id="summaryNamingRule">导入日期</strong></div>
+                <div><span>目录规则</span><strong id="summaryNamingRule">卡名 + 导入时间 / 仅保存新增媒体</strong></div>
                 <div><span>自动运行</span><strong id="summaryAutoStart">已开启</strong></div>
               </div>
               <section class="card-management" aria-labelledby="managedCardsTitle">
@@ -333,8 +384,35 @@
         <span class="eyebrow">使用说明</span><h3 id="helpTitle">什么时候可以拔卡？</h3>
         <p>复制进度达到 100% 以后，AutoCardSync 还要检查所选目标中的最终文件。只有出现绿色的“可以安全拔卡”页面时，才表示本次任务完整结束。</p>
         <div class="help-points"><span><i>1</i>插卡后自动开始</span><span><i>2</i>异常时保持素材卡原位</span><span><i>3</i>关闭窗口后仍在托盘运行</span></div>
-        <div class="sheet-actions"><button class="btn primary" data-close-sheet type="button">知道了</button></div>
+        <div class="sheet-actions"><button class="btn secondary" id="helpExitBtn" type="button">完全退出</button><button class="btn primary" data-close-sheet type="button">知道了</button></div>
       </div>
+    </div>
+
+    <div class="overlay" id="historySheet" aria-hidden="true">
+      <section class="sheet glass glass-regular history-sheet" role="dialog" aria-modal="true" aria-labelledby="historyTitle">
+        <div class="history-sheet-heading"><div><span class="eyebrow">同步历史</span><h3 id="historyTitle">这台电脑上的同步记录</h3></div><button class="sheet-close" type="button" data-close-sheet aria-label="关闭同步历史">×</button></div>
+        <p id="historyDescription">正在读取本机同步记录…</p>
+        <div class="history-list" id="historyList" aria-live="polite"></div>
+        <div class="sheet-actions"><button class="btn secondary" id="historyRefreshBtn" type="button">重新读取</button><button class="btn primary" data-close-sheet type="button">完成</button></div>
+      </section>
+    </div>
+
+    <div class="overlay" id="exitConfirmSheet" aria-hidden="true">
+      <section class="sheet glass glass-regular exit-confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="exitConfirmTitle">
+        <span class="eyebrow">完全退出</span><h3 id="exitConfirmTitle">要停止 AutoCardSync 吗？</h3>
+        <p id="exitConfirmMessage">完全退出会关闭桌面应用。</p>
+        <div class="sheet-actions"><button class="btn secondary" id="exitCancelBtn" type="button">继续运行</button><button class="btn danger" id="exitConfirmBtn" type="button">完全退出</button></div>
+      </section>
+    </div>
+
+    <div class="overlay" id="cardDecisionSheet" aria-hidden="true">
+      <section class="sheet glass glass-regular card-decision-sheet" role="dialog" aria-modal="true" aria-labelledby="cardDecisionTitle" aria-describedby="cardDecisionMessage cardDecisionDetail">
+        <span class="eyebrow">只处理你选中的这张卡</span>
+        <h3 id="cardDecisionTitle">确认素材卡操作</h3>
+        <p id="cardDecisionMessage">请确认下一步。</p>
+        <div class="card-decision-safety" id="cardDecisionDetail">源素材保持只读；已有任务、回执和历史记录不会被静默删除。</div>
+        <div class="sheet-actions"><button class="btn secondary" id="cardDecisionCancelBtn" type="button">先不处理</button><button class="btn primary" id="cardDecisionConfirmBtn" type="button">确认并继续</button></div>
+      </section>
     </div>
 
     <div class="confirm-bar glass glass-regular" id="cancelConfirm" aria-hidden="true">

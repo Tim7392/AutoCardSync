@@ -109,6 +109,43 @@ public sealed class StandaloneSetupUiTests
         Assert.Contains("document.querySelector('[data-completion-target=\"local\"]')", script, StringComparison.Ordinal);
         Assert.Contains("document.querySelector('[data-completion-target=\"nas\"]')", script, StringComparison.Ordinal);
     }
+    [Fact]
+    public void Card_scoped_setup_does_not_submit_or_save_global_settings()
+    {
+        string root = FindRepositoryRoot();
+        string script = File.ReadAllText(Path.Combine(root, "src", "AutoCardSync.Standalone", "WebUI", "scripts", "app.js"));
+        string mainWindow = File.ReadAllText(Path.Combine(root, "src", "AutoCardSync.Standalone", "MainWindow.xaml.cs"));
+
+        string cardCollector = Slice(
+            script,
+            "function collectCardScopedConfiguration()",
+            "function cardTextList(value)");
+        Assert.Contains("cameraTemplates: [selectedTemplate]", cardCollector, StringComparison.Ordinal);
+        Assert.DoesNotContain("targetMode", cardCollector, StringComparison.Ordinal);
+        Assert.DoesNotContain("localTarget", cardCollector, StringComparison.Ordinal);
+        Assert.DoesNotContain("nasMappedTarget", cardCollector, StringComparison.Ordinal);
+        Assert.DoesNotContain("autoStartOnLogin", cardCollector, StringComparison.Ordinal);
+        Assert.Contains("cardScopedOperation", script, StringComparison.Ordinal);
+        Assert.Contains("collectCardScopedConfiguration()", script, StringComparison.Ordinal);
+
+        string profileHandler = Slice(
+            mainWindow,
+            "case \"card.profile.configure\"",
+            "case \"card.profile.reinitialize\"");
+        Assert.Contains("SaveCardInitializationAsync", profileHandler, StringComparison.Ordinal);
+        Assert.DoesNotContain("SaveAsync(dto", profileHandler, StringComparison.Ordinal);
+        Assert.Contains("relativePath = selection.RelativePath", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("volumeKey = mountedCard?.VolumeKey", mainWindow, StringComparison.Ordinal);
+    }
+
+    private static string Slice(string value, string start, string end)
+    {
+        int startIndex = value.IndexOf(start, StringComparison.Ordinal);
+        int endIndex = value.IndexOf(end, startIndex + start.Length, StringComparison.Ordinal);
+        Assert.True(startIndex >= 0 && endIndex > startIndex);
+        return value[startIndex..endIndex];
+    }
+
     private static int CountOccurrences(string value, string fragment)
     {
         int count = 0;

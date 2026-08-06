@@ -22,8 +22,10 @@ public static class SourceDirectorySelectionResolver
             throw new DirectoryNotFoundException("所选素材文件夹不存在或当前不可访问。");
 
         string relative = Path.GetRelativePath(normalizedRoot, normalizedSelected);
+        // The card root is a valid, explicit source scope. Keep it as a relative
+        // root marker so the manifest builder can scan the whole card safely.
         if (relative == ".")
-            throw new InvalidDataException("请选择素材卡内的具体素材文件夹，不要选择整个盘符。");
+            return new SourceDirectorySelection(normalizedSelected, normalizedRoot, ".");
 
         string resolved;
         try

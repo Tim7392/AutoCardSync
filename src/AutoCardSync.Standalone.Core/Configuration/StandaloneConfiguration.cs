@@ -7,6 +7,7 @@ public enum TargetNamingRule
     PreserveRelativePath,
     ImportDate,
     CaptureDate,
+    CardNameAndImportTime,
 }
 
 public enum StandaloneTargetMode
@@ -119,6 +120,7 @@ public sealed record StandaloneConfiguration
             SchemaVersion = 2,
             ApprovedSourceDirectories = selected.ApprovedSourceDirectories,
             ApprovedExtensions = selected.NormalizedExtensions,
+            TargetNamingRule = TargetNamingRule.CardNameAndImportTime,
             DefaultCameraTemplateId = defaultId,
             CameraTemplates = templates,
             CardProfiles = CardProfiles.ToArray(),
@@ -127,7 +129,8 @@ public sealed record StandaloneConfiguration
 
     public bool RequiresSchemaMigration()
     {
-        if (SchemaVersion != 2 || CameraTemplates.Count == 0 || DefaultCameraTemplateId == Guid.Empty)
+        if (SchemaVersion != 2 || CameraTemplates.Count == 0 || DefaultCameraTemplateId == Guid.Empty ||
+            TargetNamingRule != TargetNamingRule.CardNameAndImportTime)
             return true;
 
         return CameraTemplates.Any(template =>
@@ -156,6 +159,8 @@ public sealed record StandaloneConfiguration
             errors.Add(new("schema_version_invalid", "The configuration schema version is not supported."));
         if (!Enum.IsDefined(TargetMode))
             errors.Add(new("target_mode_invalid", "The selected target mode is not supported."));
+        if (!Enum.IsDefined(TargetNamingRule))
+            errors.Add(new("target_naming_rule_invalid", "The selected target naming rule is not supported."));
 
         StandaloneCameraTemplate[] templates = EffectiveCameraTemplates.ToArray();
         if (templates.Any(template => template is null))
@@ -251,8 +256,13 @@ public sealed record StandaloneConfiguration
         foreach (string value in values.Where(value => !string.IsNullOrWhiteSpace(value)))
         {
             string candidate = value.Trim()
-                .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
-                .Trim(Path.DirectorySeparatorChar);
+                .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+            if (candidate is "." or "")
+                candidate = ".";
+            else
+                candidate = candidate.Trim(Path.DirectorySeparatorChar);
+            if (normalized.Contains(".", StringComparer.OrdinalIgnoreCase))
+                continue;
             if (normalized.Any(existing => IsSameOrDescendant(existing, candidate)))
                 continue;
             normalized.RemoveAll(existing => IsSameOrDescendant(candidate, existing));
@@ -271,6 +281,8 @@ public sealed record StandaloneConfiguration
             return false;
 
         string normalized = value.Replace('/', (char)92).Trim((char)92);
+        if (normalized == ".")
+            return true;
         if (normalized.Length == 0 || normalized.Contains(':', StringComparison.Ordinal))
             return false;
 

@@ -13,6 +13,10 @@ namespace AutoCardSync.Infrastructure.Copying;
 
 public readonly record struct FileVerificationProgress(long BytesVerified, long TotalBytes);
 
+/// <summary>
+/// Owns the verified final-object continuity lease returned by an atomic publish or verified reuse.
+/// The caller must keep the result alive through completion-receipt persistence and then dispose it.
+/// </summary>
 public sealed class PublishResult : IDisposable, IAsyncDisposable
 {
     private VerifiedFileContinuityLease? _continuityLease;
@@ -38,6 +42,9 @@ public sealed class PublishResult : IDisposable, IAsyncDisposable
         _continuityLease = lease,
     };
 
+    /// <summary>
+    /// Rereads the leased final object and verifies its identity, size, and SHA-256 while the lease is held.
+    /// </summary>
     public Task EnsureContinuousAsync(
         CancellationToken cancellationToken,
         IProgress<FileVerificationProgress>? progress = null)
@@ -47,6 +54,9 @@ public sealed class PublishResult : IDisposable, IAsyncDisposable
         return _continuityLease.EnsureContinuousAsync(cancellationToken, progress);
     }
 
+    /// <summary>
+    /// Verifies that the currently opened final-object handle still names the published object.
+    /// </summary>
     public void EnsureHandleContinuous()
     {
         if (!Success || _continuityLease is null)
@@ -69,21 +79,49 @@ public sealed class PublishResult : IDisposable, IAsyncDisposable
     }
 }
 
-public class ConflictException : Exception
+/// <summary>
+/// Reports that an identity-bound publish cannot safely claim the requested final path.
+/// </summary>
+public class ConflictException : IOException
 {
     public string ExistingPath { get; }
     public string Reason { get; }
+    public long? ExpectedSize { get; }
+    public string? ExpectedHash { get; }
+    public int? NativeErrorCode { get; }
 
-    public ConflictException(string existingPath, string reason)
-        : base($"Conflict at '{existingPath}': {reason}")
+    /// <summary>Creates a structured final-path conflict without overwriting the existing object.</summary>
+    public ConflictException(
+        string existingPath,
+        string reason,
+        long? expectedSize = null,
+        string? expectedHash = null,
+        int? nativeErrorCode = null,
+        Exception? innerException = null)
+        : base($"Conflict at '{existingPath}': {reason}", innerException)
     {
         ExistingPath = existingPath;
         Reason = reason;
+        ExpectedSize = expectedSize;
+        ExpectedHash = expectedHash;
+        NativeErrorCode = nativeErrorCode;
     }
 }
 
+/// <summary>
+/// Verifies a caller-owned temporary file, atomically renames it to the final path, and returns
+/// a continuity lease. Existing final files are reused only after full size and SHA-256 verification.
+/// </summary>
 public class AtomicFilePublisher
 {
+    /// <summary>
+    /// Publishes one temporary object without overwriting conflicting final content.
+    /// </summary>
+    /// <remarks>
+    /// The temporary object is opened by handle, checked against the expected identity, size, and SHA-256,
+    /// atomically renamed, reread from the final path, and kept leased until the returned result is disposed.
+    /// Target-continuity callbacks must fail closed when the selected storage identity changes.
+    /// </remarks>
     public async Task<PublishResult> PublishAsync(
         string tempPath,
         string finalPath,
@@ -134,8 +172,13 @@ public class AtomicFilePublisher
             if (expectedTempIdentity is FileIdentity expectedIdentity &&
                 verifiedTempIdentity != expectedIdentity)
             {
-                throw new IOException(
-                    $"Temporary file identity changed before publish for '{normalizedTempPath}'.");
+                throw new IdentityChangedException(
+                    "temporary-verify",
+                    normalizedTempPath,
+                    SourceHandleContinuityGuard.FormatFileId(expectedIdentity),
+                    SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                    expectedSize,
+                    tempStream.Length);
             }
             if (!string.IsNullOrWhiteSpace(expectedTempObjectIdentity) &&
                 !string.Equals(
@@ -143,8 +186,13 @@ public class AtomicFilePublisher
                     expectedTempObjectIdentity,
                     StringComparison.Ordinal))
             {
-                throw new IOException(
-                    $"Temporary file identity changed before frozen recovery publish for '{normalizedTempPath}'.");
+                throw new IdentityChangedException(
+                    "frozen-recovery-temporary-verify",
+                    normalizedTempPath,
+                    expectedTempObjectIdentity,
+                    SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                    expectedSize,
+                    tempStream.Length);
             }
 
             long tempSize = tempStream.Length;
@@ -173,8 +221,13 @@ public class AtomicFilePublisher
                 tempHandle, normalizedTempPath);
             if (currentTempIdentity != verifiedTempIdentity)
             {
-                throw new IOException(
-                    $"Temporary file identity changed during verification for '{normalizedTempPath}'.");
+                throw new IdentityChangedException(
+                    "temporary-content-verify",
+                    normalizedTempPath,
+                    SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                    SourceHandleContinuityGuard.FormatFileId(currentTempIdentity),
+                    expectedSize,
+                    tempStream.Length);
             }
 
             targetContinuityCheck?.Invoke();
@@ -189,7 +242,9 @@ public class AtomicFilePublisher
                 {
                     throw new ConflictException(
                         normalizedFinalPath,
-                        "Final path must be a newly created object and cannot reuse an existing file");
+                        "Final path must be a newly created object and cannot reuse an existing file",
+                        expectedSize,
+                        expectedHash);
                 }
 
                 PublishResult existing = await VerifyExistingAsync(
@@ -214,19 +269,32 @@ public class AtomicFilePublisher
 
                 await existing.DisposeAsync();
                 throw new ConflictException(
-                    normalizedFinalPath, "File already exists with different content");
+                    normalizedFinalPath,
+                    "File already exists with different content",
+                    expectedSize,
+                    expectedHash);
             }
 
             targetContinuityCheck?.Invoke();
             try
             {
-                RenameOpenedFile(tempHandle, normalizedFinalPath);
+                RenameOpenedFile(
+                    tempHandle,
+                    normalizedTempPath,
+                    normalizedFinalPath,
+                    SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                    expectedSize,
+                    expectedHash);
             }
-            catch (IOException) when (File.Exists(normalizedFinalPath))
+            catch (IOException exception) when (File.Exists(normalizedFinalPath))
             {
                 throw new ConflictException(
                     normalizedFinalPath,
-                    "File was created by another process before handle-bound publish");
+                    "File was created by another process before handle-bound publish",
+                    expectedSize,
+                    expectedHash,
+                    (exception as PublishOperationException)?.NativeErrorCode,
+                    exception);
             }
 
             openedTargetHandleCheck?.Invoke(tempHandle, normalizedFinalPath);
@@ -234,13 +302,23 @@ public class AtomicFilePublisher
                 tempHandle, normalizedFinalPath);
             if (publishedIdentity != verifiedTempIdentity)
             {
-                throw new IOException(
-                    $"Published file identity did not remain continuous for '{normalizedFinalPath}'.");
+                throw new IdentityChangedException(
+                    "publish-rename",
+                    normalizedFinalPath,
+                    SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                    SourceHandleContinuityGuard.FormatFileId(publishedIdentity),
+                    expectedSize,
+                    tempStream.Length);
             }
             if (tempStream.Length != expectedSize)
             {
-                throw new IOException(
-                    $"Published file size changed: expected {expectedSize}, got {tempStream.Length}.");
+                throw new IdentityChangedException(
+                    "publish-size-verify",
+                    normalizedFinalPath,
+                    SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                    SourceHandleContinuityGuard.FormatFileId(publishedIdentity),
+                    expectedSize,
+                    tempStream.Length);
             }
 
             await using var transitionStream = new FileStream(normalizedFinalPath, new FileStreamOptions
@@ -253,11 +331,17 @@ public class AtomicFilePublisher
             });
             openedTargetHandleCheck?.Invoke(
                 transitionStream.SafeFileHandle, normalizedFinalPath);
-            if (FileIdentity.GetFileIdentity(
-                    transitionStream.SafeFileHandle, normalizedFinalPath) != verifiedTempIdentity)
+            FileIdentity transitionIdentity = FileIdentity.GetFileIdentity(
+                transitionStream.SafeFileHandle, normalizedFinalPath);
+            if (transitionIdentity != verifiedTempIdentity)
             {
-                throw new IOException(
-                    $"Published path did not resolve to the renamed temporary object for '{normalizedFinalPath}'.");
+                throw new IdentityChangedException(
+                    "publish-path-transition",
+                    normalizedFinalPath,
+                    SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                    SourceHandleContinuityGuard.FormatFileId(transitionIdentity),
+                    expectedSize,
+                    transitionStream.Length);
             }
 
             await tempStream.DisposeAsync();
@@ -277,8 +361,13 @@ public class AtomicFilePublisher
                     leaseStream.SafeFileHandle, normalizedFinalPath);
                 if (leaseIdentity != verifiedTempIdentity || leaseStream.Length != expectedSize)
                 {
-                    throw new IOException(
-                        $"Published object changed while transferring its continuity lease for '{normalizedFinalPath}'.");
+                    throw new IdentityChangedException(
+                        "publish-lease-transfer",
+                        normalizedFinalPath,
+                        SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                        SourceHandleContinuityGuard.FormatFileId(leaseIdentity),
+                        expectedSize,
+                        leaseStream.Length);
                 }
 
                 targetContinuityCheck?.Invoke();
@@ -304,6 +393,10 @@ public class AtomicFilePublisher
         }
     }
 
+    /// <summary>
+    /// Fully verifies an existing final object and returns a continuity lease when it matches.
+    /// This method never treats mere path existence as successful publication.
+    /// </summary>
     public async Task<PublishResult> VerifyExistingAsync(
         string finalPath,
         string expectedHash,
@@ -353,7 +446,13 @@ public class AtomicFilePublisher
         }
     }
 
-    private static void RenameOpenedFile(SafeFileHandle handle, string finalPath)
+    private static void RenameOpenedFile(
+        SafeFileHandle handle,
+        string sourcePath,
+        string finalPath,
+        string expectedIdentity,
+        long expectedSize,
+        string expectedHash)
     {
         string nativePath = ToNativeRenamePath(finalPath);
         byte[] fileNameBytes = System.Text.Encoding.Unicode.GetBytes(nativePath);
@@ -374,8 +473,14 @@ public class AtomicFilePublisher
                     (uint)bufferSize))
             {
                 int error = Marshal.GetLastWin32Error();
-                throw new IOException(
-                    $"Handle-bound publish rename failed for '{finalPath}' (Win32 {error}).",
+                throw new PublishOperationException(
+                    "handle-bound-rename",
+                    sourcePath,
+                    finalPath,
+                    expectedIdentity,
+                    expectedSize,
+                    expectedHash,
+                    error,
                     new Win32Exception(error));
             }
         }
@@ -387,6 +492,10 @@ public class AtomicFilePublisher
 
     private static string ToNativeRenamePath(string path) => Path.GetFullPath(path);
 
+    /// <summary>
+    /// Deletes only the temporary object whose opened identity still matches <paramref name="expectedIdentity"/>.
+    /// A missing object is accepted; an identity mismatch fails closed and is never deleted.
+    /// </summary>
     public Task RollbackAsync(
         string tempPath,
         FileIdentity expectedIdentity,

@@ -2,9 +2,9 @@ name: Standalone CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, v1-standalone]
   pull_request:
-    branches: [main]
+    branches: [main, v1-standalone]
   workflow_dispatch:
 
 permissions:
@@ -38,7 +38,8 @@ jobs:
             'src/AutoCardSync.Standalone.Core/AutoCardSync.Standalone.Core.csproj',
             'src/AutoCardSync.Standalone/AutoCardSync.Standalone.csproj',
             'src/AutoCardSync.Standalone.Installer/AutoCardSync.Standalone.Installer.csproj',
-            'src/AutoCardSync.Bootstrapper/AutoCardSync.Bootstrapper.csproj'
+            'src/AutoCardSync.Bootstrapper/AutoCardSync.Bootstrapper.csproj',
+            'tests/AutoCardSync.Standalone.Core.Tests/AutoCardSync.Standalone.Core.Tests.csproj'
           )
           foreach ($project in $projects) {
             dotnet restore $project --locked-mode
@@ -50,6 +51,28 @@ jobs:
         run: |
           dotnet build src/AutoCardSync.Standalone.Core/AutoCardSync.Standalone.Core.csproj -c Release --no-restore
           if ($LASTEXITCODE -ne 0) { throw 'Standalone Core build failed.' }
+
+      - name: Test Standalone Core and collect Cobertura coverage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $testProject = 'tests/AutoCardSync.Standalone.Core.Tests/AutoCardSync.Standalone.Core.Tests.csproj'
+          $resultsDirectory = 'artifacts/coverage/standalone-core'
+          New-Item -ItemType Directory -Path $resultsDirectory -Force | Out-Null
+          dotnet test $testProject -c Release --no-restore --collect:"XPlat Code Coverage" --results-directory $resultsDirectory --logger "trx;LogFileName=standalone-core-tests.trx" -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura
+          if ($LASTEXITCODE -ne 0) { throw 'Standalone Core tests failed.' }
+
+          $coverageFiles = @(Get-ChildItem -LiteralPath $resultsDirectory -Filter 'coverage.cobertura.xml' -File -Recurse)
+          if ($coverageFiles.Count -eq 0) { throw 'Standalone Core tests completed without a Cobertura coverage file.' }
+
+      - name: Upload Standalone Core test and coverage evidence
+        if: ${{ always() && hashFiles('artifacts/coverage/standalone-core/**') != '' }}
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: standalone-core-test-coverage-${{ github.sha }}
+          path: artifacts/coverage/standalone-core/
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Download pinned offline prerequisites
         shell: pwsh

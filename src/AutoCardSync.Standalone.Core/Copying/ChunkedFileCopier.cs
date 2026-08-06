@@ -8,13 +8,33 @@ using Microsoft.Win32.SafeHandles;
 
 namespace AutoCardSync.Infrastructure.Copying;
 
+/// <summary>
+/// Copies source content into temporary target objects with durable logical checkpoints.
+/// </summary>
+/// <remarks>
+/// This type never publishes a final object. Callers are responsible for target identity binding and
+/// for publishing only after the temporary object has been independently verified.
+/// </remarks>
 public sealed class ChunkedFileCopier
 {
+    /// <summary>
+    /// Gets the logical byte span covered by each durable checkpoint.
+    /// </summary>
     public const int BlockSizeBytes = 64 * 1024 * 1024; // logical checkpoint block
+
+    /// <summary>
+    /// Gets the maximum source content that may be read ahead of the last common durable checkpoint.
+    /// </summary>
     public const int MaxReadAheadBytes = 16 * 1024 * 1024;
     private const int IoBufferSizeBytes = 1024 * 1024;
     private const int MaxReadAheadChunks = MaxReadAheadBytes / IoBufferSizeBytes;
 
+    /// <summary>
+    /// Copies a source file into a newly created temporary target without resume state.
+    /// </summary>
+    /// <remarks>
+    /// Each returned checkpoint is reported only after the target stream has been flushed to disk.
+    /// </remarks>
     public Task<IReadOnlyList<BlockCheckpoint>> CopyFileAsync(
         string sourcePath,
         string tempTargetPath,
@@ -24,6 +44,13 @@ public sealed class ChunkedFileCopier
         => CopyFileAsync(
             sourcePath, tempTargetPath, 0, progress, ct, openedTargetHandleCheck, false, null);
 
+    /// <summary>
+    /// Copies a source file into a temporary target and optionally resumes from a durable checkpoint boundary.
+    /// </summary>
+    /// <remarks>
+    /// A resume target must have exactly the requested length, and its existing prefix is reread and compared
+    /// with the source before any new bytes are appended.
+    /// </remarks>
     public async Task<IReadOnlyList<BlockCheckpoint>> CopyFileAsync(
         string sourcePath,
         string tempTargetPath,
@@ -158,6 +185,14 @@ public sealed class ChunkedFileCopier
         return checkpoints;
     }
 
+    /// <summary>
+    /// Copies one already-opened source lease to one or more already-opened temporary targets.
+    /// </summary>
+    /// <remarks>
+    /// The source is read once. A common checkpoint callback runs only after every selected target has durably
+    /// written the checkpoint bytes and the corresponding per-target journal callbacks have completed. This
+    /// method does not dispose the caller-owned source lease or target streams.
+    /// </remarks>
     [SupportedOSPlatform("windows")]
     public async Task<OpenedSourceCopyResult> CopyOpenedSourceAsync(
         SourceReadContinuityLease sourceLease,
@@ -502,6 +537,12 @@ public sealed class ChunkedFileCopier
         }
     }
 
+    /// <summary>
+    /// Calculates the SHA-256 hash of a complete file by rereading it through a read-only stream.
+    /// </summary>
+    /// <remarks>
+    /// This verifies content only; callers that require object continuity must validate the file identity separately.
+    /// </remarks>
     public async Task<string> VerifyCompleteHashAsync(string filePath, CancellationToken ct)
     {
         await using var stream = new FileStream(
@@ -576,8 +617,18 @@ public sealed class ChunkedFileCopier
     }
 }
 
+/// <summary>
+/// Describes a caller-owned temporary target stream and its durable resume facts.
+/// </summary>
+/// <remarks>
+/// The caller retains ownership of <see cref="Stream"/> and is responsible for binding the stream to its target
+/// directory before invoking <see cref="ChunkedFileCopier.CopyOpenedSourceAsync"/>.
+/// </remarks>
 public sealed class OpenedCopyTarget
 {
+    /// <summary>
+    /// Initializes a target whose persisted checkpoints describe the verified resumable prefix.
+    /// </summary>
     public OpenedCopyTarget(
         string role,
         FileStream stream,
@@ -702,12 +753,18 @@ internal sealed class PipelinedSourceChunk
     }
 }
 
+/// <summary>
+/// Returns the source hash, source bytes read, durable checkpoints, and bounded pipeline read-ahead measurement.
+/// </summary>
 public sealed record OpenedSourceCopyResult(
     string SourceSha256,
     long SourceBytesRead,
     IReadOnlyList<BlockCheckpoint> Checkpoints,
     long PeakReadAheadBeyondDurableCheckpointBytes = 0);
 
+/// <summary>
+/// Identifies a durable logical block and its SHA-256 hash for resumable copying.
+/// </summary>
 public record BlockCheckpoint(
     int BlockIndex,
     long Offset,
@@ -715,6 +772,9 @@ public record BlockCheckpoint(
     string BlockHash,
     DateTimeOffset ComputedAt);
 
+/// <summary>
+/// Reports observational copy progress; it is not completion or safety evidence.
+/// </summary>
 public record CopyProgress(
     long BytesCopied,
     int BlocksCompleted,

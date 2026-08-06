@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Text.Json;
 using AutoCardSync.Standalone.Core.Cards;
 using AutoCardSync.Standalone.Core.Configuration;
@@ -29,7 +29,7 @@ public sealed record StandaloneConfigurationDto
     public string TargetMode { get; init; } = "nas-only";
     public string LocalTarget { get; init; } = string.Empty;
     public string NasMappedTarget { get; init; } = string.Empty;
-    public string TargetNamingRule { get; init; } = "import-date";
+    public string TargetNamingRule { get; init; } = "card-time-flat";
     public bool AutoStartOnLogin { get; init; }
     public string DefaultCameraTemplateId { get; init; } = string.Empty;
     public IReadOnlyList<StandaloneCameraTemplateDto> CameraTemplates { get; init; } = [];
@@ -45,6 +45,18 @@ public sealed class StandaloneConfigurationService
     private readonly AutoCardSync.Standalone.Core.StandaloneDataPaths _paths;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private string? _recoveryNotice;
+
+    public StandaloneConfigurationService(
+        AtomicJsonFileStore<StandaloneConfiguration> store,
+        LoginAutoStartService autoStart)
+        : this(
+            store,
+            autoStart,
+            new AutoCardSync.Standalone.Core.StandaloneDataPaths(
+                Path.GetDirectoryName(store.FilePath) ??
+                throw new InvalidDataException("The configuration store has no parent directory.")))
+    {
+    }
 
     public StandaloneConfigurationService(
         AtomicJsonFileStore<StandaloneConfiguration> store,
@@ -146,13 +158,69 @@ public sealed class StandaloneConfigurationService
         }
     }
 
+    /// <summary>
+    /// Persists only the selected card template for a card-scoped operation. The incoming
+    /// payload is intentionally reduced to the selected template; global targets, defaults,
+    /// auto-start, and other card profiles are never submitted or rewritten here.
+    /// </summary>
+    public async Task<StandaloneConfigurationDto> SaveCardInitializationAsync(
+        StandaloneConfigurationDto value,
+        Guid cameraTemplateId,
+        CancellationToken cancellationToken)
+    {
+        if (cameraTemplateId == Guid.Empty)
+            throw new ArgumentException("Camera template identity is required.", nameof(cameraTemplateId));
+        StandaloneCameraTemplate template = ExtractCardTemplate(value, cameraTemplateId);
+
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            StandaloneConfiguration stored = await _store.LoadAsync(cancellationToken) ??
+                throw new InvalidDataException("首次设置未完成，不能初始化素材卡。");
+            // Card-scoped setup must not be blocked by unrelated target settings. Structural
+            // and template validation still happens through normalization; target validation
+            // remains the responsibility of the normal global-settings save path.
+            stored = stored.NormalizeForCurrentSchema();
+            StandaloneCameraTemplate? existing = stored.EffectiveCameraTemplates.SingleOrDefault(
+                candidate => candidate.TemplateId == cameraTemplateId);
+            if (existing is not null &&
+                !string.Equals(
+                    StandaloneInventoryBaselineStore.ComputeSelectionPolicyHash(
+                        existing.ApprovedSourceDirectories, existing.NormalizedExtensions),
+                    StandaloneInventoryBaselineStore.ComputeSelectionPolicyHash(
+                        template.ApprovedSourceDirectories, template.NormalizedExtensions),
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("该模板已被使用，不能静默改变其素材范围；请新建模板后初始化这张卡。");
+            }
+
+            StandaloneConfiguration updated = (stored with
+            {
+                CameraTemplates = existing is null
+                    ? stored.EffectiveCameraTemplates.Append(template).ToArray()
+                    : stored.EffectiveCameraTemplates.ToArray(),
+            }).NormalizeForCurrentSchema();
+            await _store.SaveAsync(updated, cancellationToken);
+            _recoveryNotice = null;
+            return await WithKnownCardsAsync(ToDto(updated) with
+            {
+                AutoStartOnLogin = _autoStart.IsEnabled(),
+                RecoveryNotice = string.Empty,
+            }, updated, cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     private StandaloneConfigurationDto CreateUnconfiguredDto() => new()
     {
         Configured = false,
         ApprovedSourceDirectories = [],
         ApprovedExtensions = [".jpg", ".jpeg", ".png", ".heic", ".mp4", ".mov", ".mxf", ".xml", ".xmp"],
         TargetMode = "nas-only",
-        TargetNamingRule = "import-date",
+        TargetNamingRule = "card-time-flat",
         AutoStartOnLogin = _autoStart.IsEnabled(),
         RecoveryNotice = _recoveryNotice ?? string.Empty,
     };
@@ -327,6 +395,32 @@ public sealed class StandaloneConfigurationService
         {
             _gate.Release();
         }
+    }
+
+    private static StandaloneCameraTemplate ExtractCardTemplate(
+        StandaloneConfigurationDto value,
+        Guid cameraTemplateId)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (value.CameraTemplates is null)
+            throw new InvalidDataException("素材卡初始化内容缺少相机模板。");
+
+        StandaloneCameraTemplateDto? candidate = value.CameraTemplates.SingleOrDefault(
+            template => Guid.TryParse(template.TemplateId, out Guid id) && id == cameraTemplateId);
+        if (candidate is null)
+        {
+            if (cameraTemplateId != StandaloneConfiguration.LegacyCameraTemplateId)
+                throw new InvalidDataException("素材卡初始化模板不存在。");
+            candidate = new StandaloneCameraTemplateDto
+            {
+                TemplateId = cameraTemplateId.ToString("D"),
+                Name = "默认相机",
+                ApprovedSourceDirectories = value.ApprovedSourceDirectories ?? [],
+                ApprovedExtensions = value.ApprovedExtensions ?? [],
+            };
+        }
+
+        return ToTemplate(candidate);
     }
 
     private static void EnsureReferencedTemplatePoliciesUnchanged(
@@ -650,20 +744,12 @@ public sealed class StandaloneConfigurationService
     private static TargetNamingRule FromUiRule(string value) =>
         value switch
         {
-            "capture-date" => TargetNamingRule.CaptureDate,
-            "import-date" => TargetNamingRule.ImportDate,
-            "preserve" => TargetNamingRule.PreserveRelativePath,
+            "card-time-flat" or "capture-date" or "import-date" or "preserve" =>
+                TargetNamingRule.CardNameAndImportTime,
             _ => throw new InvalidDataException("目标命名规则无效。"),
         };
 
-    private static string ToUiRule(TargetNamingRule value) =>
-        value switch
-        {
-            TargetNamingRule.CaptureDate => "capture-date",
-            TargetNamingRule.ImportDate => "import-date",
-            TargetNamingRule.PreserveRelativePath => "preserve",
-            _ => "import-date",
-        };
+    private static string ToUiRule(TargetNamingRule value) => "card-time-flat";
 }
 
 public class LoginAutoStartService

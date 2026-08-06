@@ -1,6 +1,7 @@
 ﻿using System.Runtime.Versioning;
 using System.Security;
 using System.Security.Cryptography;
+using AutoCardSync.Application.Copying;
 using AutoCardSync.Infrastructure.FileSystem;
 using AutoCardSync.Infrastructure.Storage;
 using AutoCardSync.Standalone.Core.Configuration;
@@ -49,9 +50,9 @@ public static class FinalPublishedObjectVerifier
 
                 leasedObjects.Add(OpenSource(normalizedSourceRoot, file));
                 if (journal.TargetMode.RequiresLocal())
-                    leasedObjects.Add(OpenTarget(file, file.LocalTarget, "local", journal.LocalTargetRoot, journal.LocalTargetIdentity));
+                    leasedObjects.Add(OpenTarget(journal, file, file.LocalTarget, "local", journal.LocalTargetRoot, journal.LocalTargetIdentity));
                 if (journal.TargetMode.RequiresNas())
-                    leasedObjects.Add(OpenTarget(file, file.NasTarget, "nas", journal.NasTargetRoot, journal.NasTargetIdentity));
+                    leasedObjects.Add(OpenTarget(journal, file, file.NasTarget, "nas", journal.NasTargetRoot, journal.NasTargetIdentity));
             }
 
             var lease = new FinalPublishedObjectLease(leasedObjects, targetRootChecks);
@@ -121,6 +122,7 @@ public static class FinalPublishedObjectVerifier
     }
 
     private static LeasedPublishedObject OpenTarget(
+        StandaloneTaskJournal journal,
         StandaloneFileJournal file,
         StandaloneTargetFileJournal target,
         string role,
@@ -159,7 +161,9 @@ public static class FinalPublishedObjectVerifier
                     $"Journal file '{file.RelativePath}' has a non-absolute {role} final path.");
             }
 
-            expectedPath = SafePathResolver.ResolveSafePath(targetRoot, file.RelativePath);
+            expectedPath = SafePathResolver.ResolveSafePath(
+                targetRoot,
+                CopyPathConvention.GetDestinationRelativePath(journal, file));
             fullPath = Path.GetFullPath(target.FinalPath);
         }
         catch (InvalidDataException)

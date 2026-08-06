@@ -31,7 +31,10 @@ public sealed record StandaloneMediaItemDto
     public string PrimaryAction { get; init; } = string.Empty;
     public IReadOnlyList<string> AvailableActions { get; init; } = [];
     public int SelectedFileCount { get; init; }
+    public long SelectedBytes { get; init; }
     public int DeltaFileCount { get; init; }
+    public long DeltaBytes { get; init; }
+    public string LastCompletedAtUtc { get; init; } = string.Empty;
     public double OverallPercent { get; init; }
     public string Detail { get; init; } = string.Empty;
 }
@@ -52,4 +55,16 @@ public sealed record StandaloneKnownCardDto
     public string FirstSeenUtc { get; init; } = string.Empty;
     public string LastSeenUtc { get; init; } = string.Empty;
     public string LastCompletedTaskId { get; init; } = string.Empty;
+}
+
+public sealed record StandaloneImportHistoryItemDto
+{
+    public string TaskId { get; init; } = string.Empty;
+    public string CardInstanceId { get; init; } = string.Empty;
+    public string CardDisplayName { get; init; } = "素材卡";
+    public string CompletedAtUtc { get; init; } = string.Empty;
+    public int FileCount { get; init; }
+    public long TotalBytes { get; init; }
+    public string TargetMode { get; init; } = string.Empty;
+    public bool SafeToRemoveCard { get; init; }
 }

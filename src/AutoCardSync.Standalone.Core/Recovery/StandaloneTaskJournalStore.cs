@@ -5,12 +5,25 @@ using AutoCardSync.Standalone.Core.Configuration;
 
 namespace AutoCardSync.Standalone.Core.Recovery;
 
+/// <summary>
+/// Reports the journal bytes and atomic writes performed by one store instance.
+/// </summary>
 public sealed record JournalPersistenceMetrics(long BytesWritten, int AtomicWrites);
 
+/// <summary>
+/// Binds a selected target to the identity of its opened temporary object at a common checkpoint.
+/// </summary>
 public sealed record CommonCheckpointTargetBinding(
     Guid TargetId,
     string TemporaryObjectIdentity);
 
+/// <summary>
+/// Persists and validates the recovery facts for one Standalone transfer task.
+/// </summary>
+/// <remarks>
+/// Updates are serialized and atomically persisted. A journal records recovery evidence only; callers must still
+/// validate current identities and manifest bindings before resuming or granting completion.
+/// </remarks>
 public sealed class StandaloneTaskJournalStore : ICopyJournalSink
 {
     private static readonly JsonSerializerOptions SizeOptions = new(JsonSerializerDefaults.Web)
@@ -28,6 +41,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
     private long _bytesWritten;
     private int _atomicWrites;
 
+    /// <summary>
+    /// Creates a journal store at a JSON file path or a sharded journal directory path.
+    /// </summary>
     public StandaloneTaskJournalStore(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -37,9 +53,19 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
             _legacyStore = new AtomicJsonFileStore<StandaloneTaskJournal>(_path);
     }
 
+    /// <summary>
+    /// Gets persistence work measured since this store instance was created.
+    /// </summary>
     public JournalPersistenceMetrics PersistenceMetrics =>
         new(Interlocked.Read(ref _bytesWritten), Volatile.Read(ref _atomicWrites));
 
+    /// <summary>
+    /// Validates and creates a previously absent task journal.
+    /// </summary>
+    /// <remarks>
+    /// Existing journal state is never overwritten. In sharded storage, the task header is published only after its
+    /// dependent task state has been persisted.
+    /// </remarks>
     public async Task InitializeAsync(
         StandaloneTaskJournal journal,
         CancellationToken cancellationToken)
@@ -64,6 +90,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
         }
     }
 
+    /// <summary>
+    /// Loads and validates the current journal snapshot, or returns <see langword="null"/> when no journal exists.
+    /// </summary>
     public async Task<StandaloneTaskJournal?> LoadAsync(CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
@@ -78,6 +107,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
         }
     }
 
+    /// <summary>
+    /// Records that one selected target has begun staging a source file and binds its temporary path and identity facts.
+    /// </summary>
     public ValueTask OnFileStartedAsync(
         CopyJournalFileStarted value,
         CancellationToken cancellationToken) =>
@@ -97,6 +129,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
             State = StandaloneFileState.Copying,
         }, cancellationToken);
 
+    /// <summary>
+    /// Records a durable checkpoint for one selected target after that target's copy callback has completed.
+    /// </summary>
     public ValueTask OnCheckpointCompletedAsync(
         CopyJournalCheckpointCompleted value,
         CancellationToken cancellationToken) =>
@@ -118,6 +153,12 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
                 .ToArray(),
         }, file => file with { State = StandaloneFileState.Copying }, cancellationToken);
 
+    /// <summary>
+    /// Persists a checkpoint shared by every selected target only when each target is represented exactly once.
+    /// </summary>
+    /// <remarks>
+    /// The supplied temporary object identities must remain consistent with the task's active target bindings.
+    /// </remarks>
     public async ValueTask RecordCommonCheckpointAsync(
         Guid taskId,
         Guid fileId,
@@ -192,6 +233,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
         }
     }
 
+    /// <summary>
+    /// Records a selected target's verified final object after publication or verified reuse and final reread.
+    /// </summary>
     public ValueTask OnFileVerifiedAsync(
         CopyJournalFileVerified value,
         CancellationToken cancellationToken) =>
@@ -207,6 +251,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
             Error = null,
         }, file => file, cancellationToken);
 
+    /// <summary>
+    /// Records a selected target failure so the containing file cannot be treated as complete.
+    /// </summary>
     public ValueTask OnFileFailedAsync(
         CopyJournalFileFailed value,
         CancellationToken cancellationToken) =>
@@ -216,6 +263,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
             Error = value.Error,
         }, file => file with { State = StandaloneFileState.Failed }, cancellationToken);
 
+    /// <summary>
+    /// Persists the source object identity and SHA-256 used to bind a file's selected target expectations.
+    /// </summary>
     public async Task RecordSourceContentAsync(
         Guid taskId,
         Guid fileId,
@@ -269,6 +319,9 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
         }
     }
 
+    /// <summary>
+    /// Marks the content manifest frozen after every included file has a persisted source SHA-256 fact.
+    /// </summary>
     public async Task FreezeContentManifestAsync(
         string manifestHash,
         CancellationToken cancellationToken)
@@ -308,6 +361,12 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
         }
     }
 
+    /// <summary>
+    /// Records that the local completion receipt has been durably persisted for this journal.
+    /// </summary>
+    /// <remarks>
+    /// This marker alone is not a safety decision; receipt validation and all other safety facts remain required.
+    /// </remarks>
     public async Task MarkCompletionReceiptPersistedAsync(CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken);
@@ -630,6 +689,8 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
     {
         if (journal.TaskId == Guid.Empty || string.IsNullOrWhiteSpace(journal.SourceIdentity))
             throw new InvalidDataException("The task recovery journal is missing frozen source identities.");
+        if (journal.SchemaVersion is < 1 or > 3)
+            throw new InvalidDataException("The task recovery journal schema version is not supported.");
         if (!Enum.IsDefined(journal.TargetMode))
             throw new InvalidDataException("The task recovery journal contains an unsupported target mode.");
         if (journal.SchemaVersion >= 2 && string.IsNullOrWhiteSpace(journal.InventoryManifestHash))
@@ -644,6 +705,17 @@ public sealed class StandaloneTaskJournalStore : ICopyJournalSink
             throw new InvalidDataException("The task recovery journal contains an invalid file collection.");
         if (journal.Files.Select(file => file.FileId).Distinct().Count() != journal.Files.Count)
             throw new InvalidDataException("The task recovery journal contains duplicate file identities.");
+        if (journal.SchemaVersion >= 3)
+        {
+            foreach (StandaloneFileJournal file in journal.Files)
+                CopyPathConvention.ValidateFlatFileName(file.DestinationRelativePath);
+            if (journal.Files.Select(file => file.DestinationRelativePath)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Count() != journal.Files.Count)
+            {
+                throw new InvalidDataException(
+                    "The task recovery journal contains duplicate flat destination file names.");
+            }
+        }
 
         foreach (StandaloneFileJournal file in journal.Files)
         {

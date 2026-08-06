@@ -11,6 +11,9 @@ using Microsoft.Win32.SafeHandles;
 
 namespace AutoCardSync.Application.Copying;
 
+/// <summary>
+/// Binds one selected target role to its root, storage identity, fault domain, and optional progress observer.
+/// </summary>
 public sealed record FreshTargetPlan(
     Guid TargetId,
     string Role,
@@ -20,6 +23,9 @@ public sealed record FreshTargetPlan(
     string? NasIdentity,
     IProgress<TargetCopyStatus>? Progress = null);
 
+/// <summary>
+/// Reports source-read progress for observation only; it does not establish completion or safe removal.
+/// </summary>
 public sealed record SourceReadStatus
 {
     public required Guid TaskId { get; init; }
@@ -32,6 +38,12 @@ public sealed record SourceReadStatus
     public bool IsComplete { get; init; }
 }
 
+/// <summary>
+/// Captures I/O and resource measurements from a completed fresh transfer for diagnostics.
+/// </summary>
+/// <remarks>
+/// These measurements do not replace journal, receipt, hash, or identity facts in the safety decision.
+/// </remarks>
 public sealed record FreshTransferIoMetrics
 {
     public required long PayloadBytes { get; init; }
@@ -60,6 +72,13 @@ public sealed record FreshTransferIoMetrics
         : FreshPayloadIoBytes / (double)PayloadBytes;
 }
 
+/// <summary>
+/// Holds completed transfer results together with the source, target, and publication continuity leases.
+/// </summary>
+/// <remarks>
+/// The caller must keep this execution alive until final receipt handling has revalidated continuity, then dispose it
+/// to release all leases in reverse dependency order.
+/// </remarks>
 [SupportedOSPlatform("windows")]
 public sealed class FreshTransferExecution : IAsyncDisposable
 {
@@ -88,6 +107,10 @@ public sealed class FreshTransferExecution : IAsyncDisposable
     public IReadOnlyList<FileCopyResult> Results { get; }
     public FreshTransferIoMetrics Metrics { get; }
 
+    /// <summary>
+    /// Verifies that every source, target directory, and published final object still matches its acquired identity.
+    /// </summary>
+    /// <exception cref="IOException">A leased source, target, or final object no longer has continuous identity.</exception>
     public void RevalidateContinuity()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -95,7 +118,16 @@ public sealed class FreshTransferExecution : IAsyncDisposable
         {
             SourceContinuityResult continuity = source.VerifyHandleContinuity(source.Identity);
             if (!continuity.IsContinuous)
-                throw new IOException($"Source identity lease changed: {continuity.MismatchDetail}");
+            {
+                throw new IdentityChangedException(
+                    "source-lease-revalidate",
+                    source.Identity.CanonicalFinalPath,
+                    $"{source.Identity.FileIdType}:{source.Identity.FileId}",
+                    actualIdentity: null,
+                    expectedSize: source.Identity.FileSize,
+                    actualSize: null,
+                    detail: continuity.MismatchDetail);
+            }
         }
         foreach (TargetDirectoryContinuityLease target in _targetLeases)
             target.EnsureContinuous();
@@ -103,6 +135,9 @@ public sealed class FreshTransferExecution : IAsyncDisposable
             published.EnsureHandleContinuous();
     }
 
+    /// <summary>
+    /// Releases publication, target-directory, and source leases owned by this execution.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -117,12 +152,27 @@ public sealed class FreshTransferExecution : IAsyncDisposable
     }
 }
 
+/// <summary>
+/// Executes a fresh Standalone transfer from a frozen metadata inventory through target verification and publication.
+/// </summary>
+/// <remarks>
+/// The coordinator requires one or two distinct selected targets, validates their fault-domain bindings, and returns
+/// an execution whose continuity still must be checked before the caller persists a completion receipt.
+/// </remarks>
 [SupportedOSPlatform("windows")]
 public sealed class FreshTransferCoordinator
 {
     private readonly ChunkedFileCopier _copier = new();
     private readonly AtomicFilePublisher _publisher = new();
 
+    /// <summary>
+    /// Stages every included source file, freezes the content manifest, verifies temporary and final target objects,
+    /// and returns the leases needed for the receipt boundary.
+    /// </summary>
+    /// <remarks>
+    /// The input manifest must be a frozen metadata-only inventory. If any source, target, temporary object, or
+    /// journal binding check fails, the operation throws and does not return a completed execution.
+    /// </remarks>
     public async Task<FreshTransferExecution> ExecuteAsync(
         TaskManifest inventoryManifest,
         string sourceRoot,
@@ -185,7 +235,11 @@ public sealed class FreshTransferCoordinator
                 if (!string.Equals(openedTarget.FaultDomainId, target.FaultDomainId, StringComparison.OrdinalIgnoreCase) ||
                     !string.Equals(openedTarget.StorageIdentity, target.StorageIdentity, StringComparison.Ordinal))
                 {
-                    throw new IOException($"Selected target identity changed before staging '{target.TargetRoot}'.");
+                    throw new IdentityChangedException(
+                        "target-staging",
+                        target.TargetRoot,
+                        $"{target.FaultDomainId}|{target.StorageIdentity}",
+                        $"{openedTarget.FaultDomainId}|{openedTarget.StorageIdentity}");
                 }
             }
 
@@ -249,6 +303,7 @@ public sealed class FreshTransferCoordinator
                     StagedTarget staged = OpenTargetForStaging(
                         inventoryManifest,
                         entry,
+                        CopyPathConvention.GetDestinationRelativePath(journal, journalFile),
                         target,
                         GetTargetJournal(journalFile, target.Role),
                         targetFaultDomainResolver,
@@ -387,6 +442,7 @@ public sealed class FreshTransferCoordinator
                     StagedTarget staged = OpenTargetForStaging(
                         inventoryManifest,
                         entry,
+                        CopyPathConvention.GetDestinationRelativePath(journal, journalFile),
                         target,
                         GetTargetJournal(journalFile, target.Role),
                         targetFaultDomainResolver,
@@ -426,8 +482,13 @@ public sealed class FreshTransferCoordinator
                                 StringComparison.Ordinal) ||
                             relayLease.Identity.FileSize != entry.FileSize)
                         {
-                            throw new IOException(
-                                "The completed local temporary object changed before NAS relay.");
+                            throw new IdentityChangedException(
+                                "nas-relay-source",
+                                source.Target.OpenedTempPath,
+                                expectedRelayIdentity,
+                                relayLease.Identity.FileId,
+                                entry.FileSize,
+                                relayLease.Identity.FileSize);
                         }
 
                         long completedBeforeFile = state.CompletedStagingBytes;
@@ -682,6 +743,7 @@ public sealed class FreshTransferCoordinator
     private static StagedTarget OpenTargetForStaging(
         TaskManifest inventoryManifest,
         ManifestEntry entry,
+        string destinationRelativePath,
         FreshTargetPlan plan,
         StandaloneTargetFileJournal journal,
         FaultDomainResolver faultDomainResolver,
@@ -705,10 +767,10 @@ public sealed class FreshTransferCoordinator
                 DualTargetCopyCoordinator.CreateOpenedTargetStorageBinding(
                     plan.TargetRoot, openedTarget, plan.StorageIdentity);
 
-            string logicalFinalPath = CopyPathConvention.GetFinalPath(plan.TargetRoot, entry.RelativePath);
+            string logicalFinalPath = CopyPathConvention.GetFinalPath(plan.TargetRoot, destinationRelativePath);
             string logicalTempPath = CopyPathConvention.GetTempPath(
                 plan.TargetRoot,
-                entry.RelativePath,
+                destinationRelativePath,
                 inventoryManifest.TaskId,
                 entry.Id,
                 plan.TargetId);
@@ -745,7 +807,15 @@ public sealed class FreshTransferCoordinator
                 string actualIdentity = SourceHandleContinuityGuard.FormatFileId(
                     FileIdentity.GetFileIdentity(stream.SafeFileHandle, openedTempPath));
                 if (!string.Equals(actualIdentity, journal.TemporaryObjectIdentity, StringComparison.Ordinal))
-                    throw new IOException("The resume temporary object identity changed.");
+                {
+                    throw new IdentityChangedException(
+                        "resume-temporary-open",
+                        openedTempPath,
+                        journal.TemporaryObjectIdentity,
+                        actualIdentity,
+                        entry.FileSize,
+                        stream.Length);
+                }
                 if (stream.Length < resumeOffset || stream.Length > entry.FileSize)
                     throw new InvalidDataException("The resume temporary length is outside the persisted checkpoint and frozen source bounds.");
                 if (stream.Length > resumeOffset)
@@ -943,7 +1013,14 @@ public sealed class FreshTransferCoordinator
             !string.Equals(entry.SourceFileIdType, current.FileIdType, StringComparison.Ordinal) ||
             !string.Equals(entry.SourceFileId, current.FileId, StringComparison.Ordinal))
         {
-            throw new IOException($"Source inventory identity changed for '{entry.RelativePath}'.");
+            throw new IdentityChangedException(
+                "source-inventory-revalidate",
+                entry.RelativePath,
+                $"{entry.SourceFileIdType}:{entry.SourceFileId}",
+                $"{current.FileIdType}:{current.FileId}",
+                entry.FileSize,
+                current.FileSize,
+                $"Expected modified time {entry.LastModifiedUtc:O}; observed {current.LastModifiedUtc:O}.");
         }
     }
 

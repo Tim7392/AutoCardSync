@@ -20,6 +20,12 @@ AutoCardSync Standalone is a Windows application for importing approved media fr
 - Very large file-count and checkpoint-count workloads remain release-gated. The current safety design keeps source identity evidence open for the batch and persists recovery checkpoints conservatively; this favors recoverability over minimum handle count and minimum journal-write amplification.
 - Do not put card contents, customer data, NAS addresses, runtime state, receipts, logs, credentials, or installation artifacts in issues or pull requests.
 
+## Architecture and safety model
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the Standalone trust boundary, source-read-only rule,
+fault-domain checks, fresh-transfer and frozen-recovery flows, and the evidence required before the
+application reports that the current card can be removed safely.
+
 ## Build boundaries
 
 The public solution contains only the Standalone V1 application, its required shared domain project, installer/bootstrapper projects, and Standalone tests.
@@ -39,7 +45,12 @@ pwsh -NoProfile -File tools/Build-StandaloneSetup.ps1 `
 
 That route validates the pinned offline runtime prerequisites, builds the Standalone application and MSI, creates the Setup executable, and runs the repository's static bundle validator. The prerequisite binaries and generated artifacts are deliberately not committed.
 
-GitHub Actions runs the Standalone Core build and the same static setup-validation route for `main`. Each CI artifact includes a manifest binding the built commit, requested version, and SHA-256 values. The manual candidate workflow creates **unsigned candidate evidence only**; it does not publish a GitHub Release, sign files, or claim external acceptance.
+GitHub Actions runs the Standalone Core tests with Cobertura coverage collection, builds the Core,
+and runs the same static setup-validation route for `main`. Test/coverage output is retained as a CI
+artifact, but no coverage threshold is claimed until a reviewed baseline exists. Each setup artifact
+includes a manifest binding the built commit, requested version, and SHA-256 values. The manual
+candidate workflow creates **unsigned candidate evidence only**; it does not publish a GitHub Release,
+sign files, or claim external acceptance.
 
 ## Contributing
 

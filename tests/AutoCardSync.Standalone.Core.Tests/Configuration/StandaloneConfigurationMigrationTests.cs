@@ -411,6 +411,74 @@ public sealed class StandaloneConfigurationMigrationTests : IDisposable
         Assert.Equal(["DCIM"], persisted.DefaultCameraTemplate.ApprovedSourceDirectories);
     }
 
+    [Fact]
+    public async Task Card_scoped_template_save_ignores_unrelated_global_fields_and_preserves_other_cards()
+    {
+        string path = Path.Combine(_root, "configuration-card-scope.json");
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(path);
+        Guid defaultTemplateId = Guid.NewGuid();
+        Guid selectedTemplateId = Guid.NewGuid();
+        Guid otherCardId = Guid.NewGuid();
+        StandaloneConfiguration stored = LegacyConfiguration() with
+        {
+            SchemaVersion = 2,
+            DefaultCameraTemplateId = defaultTemplateId,
+            CameraTemplates = [Template(defaultTemplateId, "默认范围", "DCIM", ".mov")],
+            CardProfiles =
+            [
+                new StandaloneCardProfile
+                {
+                    CardInstanceId = otherCardId,
+                    DisplayName = "其他素材卡",
+                    CameraTemplateId = defaultTemplateId,
+                },
+            ],
+            AutoStartOnLogin = true,
+        };
+        await store.SaveAsync(stored, CancellationToken.None);
+        var service = new StandaloneConfigurationService(store, new TestLoginAutoStartService());
+        StandaloneConfigurationDto cardScope = new()
+        {
+            TargetMode = "local-and-nas",
+            LocalTarget = @"C:\Same",
+            NasMappedTarget = @"C:\Same",
+            DefaultCameraTemplateId = selectedTemplateId.ToString("D"),
+            CameraTemplates =
+            [
+                new StandaloneCameraTemplateDto
+                {
+                    TemplateId = selectedTemplateId.ToString("D"),
+                    Name = "当前卡范围",
+                    ApprovedSourceDirectories = ["."],
+                    ApprovedExtensions = [".mp4"],
+                },
+                new StandaloneCameraTemplateDto
+                {
+                    TemplateId = Guid.NewGuid().ToString("D"),
+                    Name = "当前卡范围",
+                    ApprovedSourceDirectories = ["PRIVATE"],
+                    ApprovedExtensions = [".jpg"],
+                },
+            ],
+        };
+
+        await service.SaveCardInitializationAsync(
+            cardScope, selectedTemplateId, CancellationToken.None);
+        StandaloneConfiguration persisted = Assert.IsType<StandaloneConfiguration>(
+            await store.LoadAsync(CancellationToken.None));
+
+        Assert.Equal(stored.LocalTargetPath, persisted.LocalTargetPath);
+        Assert.Equal(stored.NasMappedTargetPath, persisted.NasMappedTargetPath);
+        Assert.Equal(stored.TargetMode, persisted.TargetMode);
+        Assert.Equal(defaultTemplateId, persisted.DefaultCameraTemplateId);
+        Assert.True(persisted.AutoStartOnLogin);
+        Assert.Equal(stored.CardProfiles, persisted.CardProfiles);
+        StandaloneCameraTemplate selected = Assert.Single(
+            persisted.CameraTemplates, template => template.TemplateId == selectedTemplateId);
+        Assert.Equal(["."], selected.ApprovedSourceDirectories);
+        Assert.Equal([".mp4"], selected.NormalizedExtensions);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

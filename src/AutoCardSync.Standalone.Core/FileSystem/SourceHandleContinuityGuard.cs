@@ -167,7 +167,15 @@ public class SourceHandleContinuityGuard
             string openedFileId = FormatFileId(
                 FileIdentity.GetFileIdentity(stream.SafeFileHandle, canonicalFinalPath));
             if (!string.Equals(identity.FileId, openedFileId, StringComparison.Ordinal))
-                throw new IOException($"Source object changed while opening '{canonicalFinalPath}'.");
+            {
+                throw new IdentityChangedException(
+                    "source-open",
+                    canonicalFinalPath,
+                    identity.FileId,
+                    openedFileId,
+                    identity.FileSize,
+                    stream.Length);
+            }
             return new SourceReadContinuityLease(this, stream, identity);
         }
         catch

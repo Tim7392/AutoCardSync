@@ -52,6 +52,8 @@ public sealed record StandaloneFileJournal
 {
     public required Guid FileId { get; init; }
     public required string RelativePath { get; init; }
+    /// <summary>Gets the frozen single-level target file name for schema-v3 tasks.</summary>
+    public string DestinationRelativePath { get; init; } = string.Empty;
     public required long Length { get; init; }
     public required string SourceSha256 { get; init; }
     public string? SourceFileIdentity { get; init; }
@@ -90,8 +92,18 @@ public sealed record RecoveryIdentitySnapshot(
 
 public sealed record RecoveryEligibility(bool CanResume, IReadOnlyList<string> Reasons);
 
+/// <summary>
+/// Evaluates whether current source, card, manifest, target mode, and required target identities match a task journal.
+/// </summary>
 public static class RecoveryGuard
 {
+    /// <summary>
+    /// Returns resumable only when every identity and manifest fact required by the journal remains unchanged.
+    /// </summary>
+    /// <remarks>
+    /// This is an eligibility check only. A caller must still validate the manifest-to-journal binding and staged
+    /// objects before publishing final objects or writing a completion receipt.
+    /// </remarks>
     public static RecoveryEligibility Evaluate(
         StandaloneTaskJournal journal,
         RecoveryIdentitySnapshot current)
