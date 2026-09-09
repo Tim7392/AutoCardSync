@@ -1,5 +1,6 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
+using System.Reflection;
 using AutoCardSync.Infrastructure.FileSystem;
 using AutoCardSync.Infrastructure.Storage;
 using AutoCardSync.Standalone.Core.Configuration;
@@ -12,6 +13,41 @@ public sealed class FinalPublishedObjectVerifierTests : IDisposable
 {
     private readonly string _root = Path.Combine(
         Path.GetTempPath(), "AutoCardSync-V1-FinalVerifier", Guid.NewGuid().ToString("N"));
+
+    [Fact]
+    public async Task Runtime_status_commit_keeps_verified_objects_locked_until_publication_finishes()
+    {
+        byte[] content = Encoding.UTF8.GetBytes("status-publication-continuity");
+        Fixture fixture = await CreateFixtureAsync(content);
+        FinalPublishedObjectLease lease = await FinalPublishedObjectVerifier.AcquireVerifiedLeaseAsync(
+            fixture.SourceRoot, CreateJournal(fixture, content), CancellationToken.None);
+        Type statusType = typeof(AutoCardSync.Standalone.Services.StandaloneRuntimeService)
+            .GetNestedType("VerifiedCompletedStatus", BindingFlags.NonPublic)!;
+        object marker = new();
+        object result = Activator.CreateInstance(statusType, marker,
+            new List<FinalPublishedObjectLease> { lease })!;
+        bool published = false;
+        statusType.GetMethod("Commit")!.Invoke(result, [(Action<object>)(status =>
+        {
+            Assert.Same(marker, status);
+            AssertWriteBlocked(fixture.SourcePath);
+            AssertWriteBlocked(fixture.LocalPath);
+            AssertWriteBlocked(fixture.NasPath);
+            published = true;
+        }), CancellationToken.None]);
+        Assert.True(published);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var cancelled = Assert.Throws<TargetInvocationException>(() =>
+            statusType.GetMethod("Commit")!.Invoke(result,
+                [(Action<object>)(_ => Assert.Fail("Cancelled evidence published a status.")), cancellation.Token]));
+        Assert.IsType<OperationCanceledException>(cancelled.InnerException);
+        await ((IAsyncDisposable)result).DisposeAsync();
+        await File.WriteAllBytesAsync(fixture.LocalPath, content);
+        var failure = Assert.Throws<TargetInvocationException>(() =>
+            statusType.GetMethod("Commit")!.Invoke(result, [(Action<object>)(_ => Assert.Fail("Disposed evidence published a status.")), CancellationToken.None]));
+        Assert.IsType<ObjectDisposedException>(failure.InnerException);
+    }
 
     [Fact]
     public async Task Acquire_holds_source_and_both_verified_targets_through_revalidation()
@@ -139,7 +175,12 @@ public sealed class FinalPublishedObjectVerifierTests : IDisposable
             return;
 
         StandaloneTaskJournal journal = CreateJournal(fixture, content);
-        await Assert.ThrowsAsync<IOException>(() => AcquireAsync(fixture, journal));
+        InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+            () => AcquireAsync(fixture, journal));
+        PathViolationException violation = Assert.IsType<PathViolationException>(failure.InnerException);
+        Assert.Contains("reparse point", violation.Message, StringComparison.Ordinal);
+        Assert.Equal(content, await File.ReadAllBytesAsync(fixture.SourcePath));
+        Assert.Equal(content, await File.ReadAllBytesAsync(realLocal));
     }
 
     [Fact]

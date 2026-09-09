@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using System.Text;
 using AutoCardSync.Infrastructure.FileSystem;
 using AutoCardSync.Standalone.Core.Recovery;
@@ -37,7 +37,14 @@ public static class CopyPathConvention
 
         foreach (IGrouping<string, string> group in groups.Where(group => group.Count() > 1))
         {
-            foreach (string source in group.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+            string canonicalFileName = group
+                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(value => value, StringComparer.Ordinal)
+                .Select(GetFlatFileName)
+                .First();
+            foreach (string source in group
+                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(value => value, StringComparer.Ordinal))
             {
                 string hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
                     source.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
@@ -45,7 +52,7 @@ public static class CopyPathConvention
                 string? destination = null;
                 for (int length = 8; length <= hash.Length; length += 4)
                 {
-                    string candidate = AddStableSuffix(group.Key, hash[..Math.Min(length, hash.Length)]);
+                    string candidate = AddStableSuffix(canonicalFileName, hash[..Math.Min(length, hash.Length)]);
                     if (used.Add(candidate))
                     {
                         destination = candidate;

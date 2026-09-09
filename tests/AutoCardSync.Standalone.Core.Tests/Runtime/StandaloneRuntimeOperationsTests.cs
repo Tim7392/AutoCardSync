@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using AutoCardSync.Agent.Service.Devices;
 using AutoCardSync.Application.Cards;
 using AutoCardSync.Application.Ingestion;
@@ -24,6 +24,27 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
     {
         Directory.CreateDirectory(_root);
         return Task.CompletedTask;
+    }
+
+    [Theory]
+    [InlineData("空素材卡已初始化")]
+    [InlineData("没有发现新增素材")]
+    [InlineData("素材卡基线已自动整理")]
+    public async Task Baseline_observations_never_promote_card_center_to_verified(string headline)
+    {
+        StandaloneDataPaths paths = new(_root);
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(paths.ConfigurationFile);
+        await using StandaloneRuntimeService runtime = CreateRuntime(paths, store);
+        const string key = "synthetic-mounted-card";
+        SetPrivateField(runtime, "_activeVolumeKey", key);
+        var states = (Dictionary<string, StandaloneMediaItemDto>)GetPrivateField(runtime, "_mediaStates")!;
+        states[key] = new StandaloneMediaItemDto { VolumeKey = key, IdentityState = "known_card" };
+        object baseline = typeof(StandaloneRuntimeService).GetMethod("BaselineReadyStatus",
+            BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, [headline, "metadata only"])!;
+        typeof(StandaloneRuntimeService).GetMethod("ApplyMainStatusToActiveMediaNoLock",
+            BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(runtime, [baseline]);
+        Assert.Equal("no_backup_conclusion", states[key].SafetyConclusion);
+        Assert.False(GetProperty<bool>(baseline, "safeToClear"));
     }
 
     [Theory]
@@ -95,6 +116,37 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         StandaloneRuntimeOperationResult result = await runtime.RefreshAsync(CancellationToken.None);
 
         Assert.Contains("没有已挂载的素材卡", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cleanup_and_new_material_keep_retained_files_out_of_the_new_transfer()
+    {
+        DateTimeOffset timestamp = DateTimeOffset.UtcNow;
+        var baseline = new StandaloneInventoryBaseline
+        {
+            CardInstanceId = Guid.NewGuid(), SourceIdentity = "synthetic-card", SelectionPolicyHash = new string('a', 64),
+            UpdatedAtUtc = timestamp, LastCompletedTaskId = Guid.NewGuid(),
+            Entries = new[] { "retained.mov", "removed.mov" }.Select(path => new StandaloneInventoryBaselineEntry
+            {
+                RelativePath = path, Length = 1, LastModifiedUtc = timestamp,
+                SourceFileIdentity = path, SourceFileIdentityType = "test",
+            }).ToArray(),
+        };
+        var inventory = new TaskManifest(Guid.NewGuid());
+        foreach (string path in new[] { "retained.mov", "new.mov" })
+            inventory.AddEntry(new ManifestEntry
+            {
+                RelativePath = path, FileSize = 1, LastModifiedUtc = timestamp,
+                SourceFileId = path, SourceFileIdType = "test",
+            });
+        inventory.Freeze();
+        StandaloneInventoryDelta delta = StandaloneInventoryBaselineStore.Compare(baseline, new string('a', 64), inventory);
+        Assert.Equal(["removed.mov"], delta.MissingPaths);
+        var selected = (IReadOnlyList<ManifestEntry>)typeof(StandaloneRuntimeService).GetMethod(
+            "IncludeContentWitnessTransferEntries", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, [inventory, delta.TransferEntries, false, false])!;
+        Assert.Equal(["new.mov"], selected.Select(entry => entry.RelativePath));
+        Assert.Equal(2, baseline.Entries.Count);
     }
 
     [Fact]
@@ -195,7 +247,7 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Safe_mounted_volume_restarts_only_after_metadata_delta_appears()
+    public async Task Safe_mounted_volume_revalidates_objects_even_without_metadata_delta()
     {
         string sourceRoot = Path.Combine(_root, "source-card");
         string approvedRoot = Path.Combine(sourceRoot, "XDROOT", "Clip");
@@ -250,7 +302,7 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
 
         bool unchanged = await Assert.IsAssignableFrom<Task<bool>>(
             method.Invoke(runtime, [volume, configuration, CancellationToken.None]));
-        Assert.False(unchanged);
+        Assert.True(unchanged);
 
         await File.WriteAllBytesAsync(Path.Combine(approvedRoot, "new.mov"), new byte[2048]);
         bool added = await Assert.IsAssignableFrom<Task<bool>>(
@@ -528,7 +580,7 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Failed_current_card_keeps_its_recovery_screen_until_removed_before_next_card_starts()
+    public async Task Failed_current_card_does_not_block_the_next_queued_card_while_still_mounted()
     {
         StandaloneDataPaths paths = new(_root);
         var store = new AtomicJsonFileStore<StandaloneConfiguration>(paths.ConfigurationFile);
@@ -544,24 +596,59 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         MethodInfo finishFailed = typeof(StandaloneRuntimeService).GetMethod(
             "CompleteFailedCurrentVolume", BindingFlags.NonPublic | BindingFlags.Instance) ??
             throw new InvalidOperationException("Missing failed-card completion method.");
-        MethodInfo removed = typeof(StandaloneRuntimeService).GetMethod(
-            "OnVolumeRemoved", BindingFlags.NonPublic | BindingFlags.Instance) ??
-            throw new InvalidOperationException("Missing volume removal method.");
         SetPrivateField(runtime, "_activeTask", Task.Delay(TimeSpan.FromMinutes(1)));
         Assert.Null(start.Invoke(runtime, [second, false]));
         SetPrivateField(runtime, "_activeTask", Task.CompletedTask);
 
         finishFailed.Invoke(runtime, [GetVolumeKey(first)]);
 
-        Assert.True(Assert.IsType<bool>(GetPrivateField(runtime, "_currentVolumeBlocked")));
-        Assert.Same(first, GetPrivateField(runtime, "_lastArrivedVolume"));
-        Assert.Single(Assert.IsAssignableFrom<System.Collections.ICollection>(
+        Assert.False(Assert.IsType<bool>(GetPrivateField(runtime, "_currentVolumeBlocked")));
+        Assert.Empty(Assert.IsAssignableFrom<System.Collections.ICollection>(
             GetPrivateField(runtime, "_pendingVolumes")).Cast<object>());
-
-        removed.Invoke(runtime, [runtime, first]);
-
         Assert.NotEqual(GetVolumeKey(first), GetPrivateField(runtime, "_activeVolumeKey"));
         Assert.Same(second, GetPrivateField(runtime, "_lastArrivedVolume"));
+    }
+
+    [Fact]
+    public async Task Failed_reset_does_not_hold_the_global_card_queue()
+    {
+        StandaloneDataPaths paths = new(_root);
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(paths.ConfigurationFile);
+        await using StandaloneRuntimeService runtime = CreateRuntime(paths, store);
+        var first = new VolumeEventArgs(Path.Combine(_root, "reset-failed"), "reset-failed", "NTFS", 1, DateTimeOffset.UtcNow);
+        var second = new VolumeEventArgs(Path.Combine(_root, "after-reset"), "after-reset", "NTFS", 2, DateTimeOffset.UtcNow);
+        SetPrivateField(runtime, "_activeTask", Task.Delay(TimeSpan.FromMinutes(1)));
+        SetPrivateField(runtime, "_activeVolumeKey", GetVolumeKey(first));
+        SetPrivateField(runtime, "_lastArrivedVolume", first);
+        MethodInfo start = typeof(StandaloneRuntimeService).GetMethod(
+            "TryStartTransfer", BindingFlags.NonPublic | BindingFlags.Instance) ??
+            throw new InvalidOperationException("Missing transfer start method.");
+        Assert.Null(start.Invoke(runtime, [second, false]));
+        SetPrivateField(runtime, "_activeTask", Task.CompletedTask);
+        SetPrivateField(runtime, "_currentVolumeBlocked", true);
+        SetPrivateField(runtime, "_stateRepairInProgress", true);
+        MethodInfo endRepair = typeof(StandaloneRuntimeService).GetMethod(
+            "EndStateRepair", BindingFlags.NonPublic | BindingFlags.Instance) ??
+            throw new InvalidOperationException("Missing state repair completion method.");
+
+        endRepair.Invoke(runtime, null);
+
+        Assert.False(Assert.IsType<bool>(GetPrivateField(runtime, "_currentVolumeBlocked")));
+        Assert.Empty(Assert.IsAssignableFrom<System.Collections.ICollection>(
+            GetPrivateField(runtime, "_pendingVolumes")).Cast<object>());
+        Assert.Same(second, GetPrivateField(runtime, "_lastArrivedVolume"));
+    }
+
+    [Theory]
+    [InlineData("XDROOT")]
+    [InlineData("xdroot")]
+    [InlineData("DCIM")]
+    public void Common_camera_roots_are_accepted_when_windows_reports_a_fixed_reader(string directoryName)
+    {
+        MethodInfo recognized = typeof(StandaloneRuntimeService).GetMethod(
+            "IsRecognizedMediaDirectoryName", BindingFlags.NonPublic | BindingFlags.Static) ??
+            throw new InvalidOperationException("Missing media-directory fallback classifier.");
+        Assert.True(Assert.IsType<bool>(recognized.Invoke(null, [directoryName])));
     }
 
     [Fact]
@@ -727,6 +814,45 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
 
         Assert.DoesNotContain(GetVolumeKey(first), safe);
         Assert.Contains(GetVolumeKey(second), safe);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Verified_completion_and_card_removal_have_one_state_commit_order(bool removeFirst)
+    {
+        StandaloneDataPaths paths = new(_root);
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(paths.ConfigurationFile);
+        await using StandaloneRuntimeService runtime = CreateRuntime(paths, store);
+        var volume = new VolumeEventArgs(Path.Combine(_root, "commit-card"), "commit-card", "NTFS", 1,
+            DateTimeOffset.UtcNow, MountIdentity: "synthetic-session", MountContinuityProven: true);
+        Guid operationId = Guid.NewGuid();
+        SetPrivateField(runtime, "_activeTask", new TaskCompletionSource().Task);
+        SetPrivateField(runtime, "_activeVolumeKey", GetVolumeKey(volume));
+        SetPrivateField(runtime, "_activeOperationId", operationId);
+        object status = new { view = "complete", safeToClear = true, verificationScope = "current-inventory" };
+        Type evidenceType = typeof(StandaloneRuntimeService).GetNestedType("VerifiedCompletedStatus", BindingFlags.NonPublic)!;
+        await using var evidence = (IAsyncDisposable)Activator.CreateInstance(evidenceType, status,
+            new List<AutoCardSync.Standalone.Core.Transfer.FinalPublishedObjectLease>())!;
+        MethodInfo removed = typeof(StandaloneRuntimeService).GetMethod("OnVolumeRemoved", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        int completedEvents = 0;
+        runtime.StatusChanged += (_, snapshot) =>
+        {
+            if (GetProperty<string>(snapshot, "view") != "complete") return;
+            completedEvents++;
+            Assert.Null(GetPrivateField(runtime, "_activeOperationId"));
+            Assert.Contains(GetVolumeKey(volume), GetSafeCompletedVolumes(runtime));
+            Assert.Same(status, runtime.GetStatusSnapshot());
+        };
+        if (removeFirst) removed.Invoke(runtime, [runtime, volume]);
+        bool committed = (bool)typeof(StandaloneRuntimeService).GetMethod("CommitVerifiedCompletion",
+            BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(runtime,
+                [operationId, volume, evidence, CancellationToken.None])!;
+        Assert.Equal(!removeFirst, committed);
+        Assert.Equal(removeFirst ? 0 : 1, completedEvents);
+        if (!removeFirst) removed.Invoke(runtime, [runtime, volume]);
+        Assert.DoesNotContain(GetVolumeKey(volume), GetSafeCompletedVolumes(runtime));
+        SetPrivateField(runtime, "_activeTask", Task.CompletedTask);
     }
 
     [Fact]
@@ -1388,7 +1514,8 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         StandaloneCardIdentityMap identityMap = Assert.IsType<StandaloneCardIdentityMap>(
             await new AtomicJsonFileStore<StandaloneCardIdentityMap>(paths.CardIdentityFile)
                 .LoadAsync(CancellationToken.None));
-        Assert.Equal(2, identityMap.Bindings.Count);
+        Assert.Single(identityMap.Bindings);
+        Assert.Single(identityMap.ArchivedBindings);
     }
 
     [Fact]
@@ -1557,7 +1684,7 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Unrelated_and_duplicate_pending_initializations_are_abandoned_without_card_id_overwrite_or_growth()
+    public async Task Card_initialization_imports_existing_material_and_only_retires_matching_stale_state()
     {
         string sourceRoot = Path.Combine(_root, "current-card");
         string sourceA = Path.Combine(_root, "previous-card");
@@ -1647,30 +1774,57 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
                 ],
             }, CancellationToken.None);
         await using StandaloneRuntimeService runtime = CreateRuntime(paths, configurationStore);
-        SetPrivateField(runtime, "_lastArrivedVolume", new VolumeEventArgs(
-            sourceRoot, "current-card-volume", "NTFS", 1, DateTimeOffset.UtcNow));
+        var mountedVolume = new VolumeEventArgs(
+            sourceRoot, "current-card-volume", "NTFS", 1, DateTimeOffset.UtcNow);
+        SetPrivateField(runtime, "_lastArrivedVolume", mountedVolume);
+        string mountedVolumeKey = GetVolumeKey(mountedVolume);
+        Dictionary<string, StandaloneMediaItemDto> mediaStates = Assert.IsType<Dictionary<string, StandaloneMediaItemDto>>(
+            GetPrivateField(runtime, "_mediaStates"));
+        mediaStates[mountedVolumeKey] = new StandaloneMediaItemDto
+        {
+            MountSessionId = Guid.NewGuid().ToString("D"),
+            VolumeKey = mountedVolumeKey,
+            DriveLetter = sourceRoot,
+            FileSystem = "NTFS",
+            CapacityBytes = 1,
+            PresenceState = "mounted",
+            IdentityState = "known_card",
+            CardInstanceId = knownCurrentCard.ToString("D"),
+        };
 
-        StandaloneRuntimeOperationResult failed = await runtime.RetryAsync(CancellationToken.None);
-        object failedFacts = GetProperty<object>(failed.Status, "failure")!;
-        Assert.True(GetProperty<bool>(failedFacts, "canReinitializeCard"));
+        MethodInfo initialize = Assert.Single(
+            typeof(StandaloneRuntimeService).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic),
+            method => method.Name == "ReinitializeCurrentCardAsync" && method.GetParameters().Length == 8);
+        Task<StandaloneRuntimeOperationResult> initializeTask = Assert.IsAssignableFrom<Task<StandaloneRuntimeOperationResult>>(
+            initialize.Invoke(runtime,
+            [
+                true,
+                null,
+                templateId,
+                null,
+                null,
+                false,
+                true,
+                CancellationToken.None,
+            ]));
+        StandaloneRuntimeOperationResult initialized = await initializeTask;
 
-        StandaloneRuntimeOperationResult repaired = await runtime.ReinitializeCurrentCardAsync(
-            true, CancellationToken.None);
-
-        Assert.Equal("failure", GetProperty<string>(repaired.Status, "view"));
+        Assert.True(initialized.ManagedCardInitializationCommitted);
+        Assert.NotEqual("software-initialized", GetProperty<string>(initialized.Status, "phase"));
+        Assert.Contains("后台开始重新检查", initialized.Message, StringComparison.Ordinal);
+        if (GetPrivateField(runtime, "_activeTask") is Task activeImport)
+            await activeImport.WaitAsync(TimeSpan.FromSeconds(10));
         StandaloneInventoryBaselineDocument repairedDocument = Assert.IsType<StandaloneInventoryBaselineDocument>(
             await new AtomicJsonFileStore<StandaloneInventoryBaselineDocument>(paths.CardInventoryBaselineFile)
                 .LoadAsync(CancellationToken.None));
-        StandaloneInventoryBaseline current = Assert.Single(repairedDocument.Baselines);
-        Assert.Equal(knownCurrentCard, current.CardInstanceId);
-        Assert.NotEqual(pendingA, current.CardInstanceId);
-        Assert.NotEqual(pendingDuplicate, current.CardInstanceId);
-        Assert.NotEqual(pendingMatching, current.CardInstanceId);
+        StandaloneInventoryBaseline current = Assert.Single(
+            repairedDocument.Baselines, value => value.CardInstanceId == knownCurrentCard);
         Assert.False(current.InitializationPending);
-        Assert.Empty(current.Entries);
-        Assert.Equal(3, repairedDocument.AbandonedInitializations.Count);
-        Assert.Contains(repairedDocument.AbandonedInitializations, value => value.CardInstanceId == pendingA);
-        Assert.Contains(repairedDocument.AbandonedInitializations, value => value.CardInstanceId == pendingDuplicate);
+        Assert.Equal(currentEvidence.RootDirectoryHash, current.InitializationEvidence!.RootDirectoryHash);
+        Assert.Equal(2, repairedDocument.Baselines.Count(value => value.InitializationPending));
+        Assert.Contains(repairedDocument.Baselines, value => value.CardInstanceId == pendingA && value.InitializationPending);
+        Assert.Contains(repairedDocument.Baselines, value => value.CardInstanceId == pendingDuplicate && value.InitializationPending);
+        Assert.DoesNotContain(repairedDocument.Baselines, value => value.CardInstanceId == pendingMatching);
         Assert.Contains(repairedDocument.AbandonedInitializations, value => value.CardInstanceId == pendingMatching);
         StandaloneCardIdentityMap identities = Assert.IsType<StandaloneCardIdentityMap>(
             await new AtomicJsonFileStore<StandaloneCardIdentityMap>(paths.CardIdentityFile)
@@ -1679,19 +1833,14 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
             identities.Bindings, value => value.CardInstanceId == pendingA);
         Assert.Equal(previousEvidence.RootDirectoryHash, original.Evidence.RootDirectoryHash);
         Assert.Equal(previousEvidence.SampleFingerprint, original.Evidence.SampleFingerprint);
-
-        _ = await runtime.RetryAsync(CancellationToken.None);
-        StandaloneInventoryBaselineDocument stable = Assert.IsType<StandaloneInventoryBaselineDocument>(
-            await new AtomicJsonFileStore<StandaloneInventoryBaselineDocument>(paths.CardInventoryBaselineFile)
-                .LoadAsync(CancellationToken.None));
-        Assert.Single(stable.Baselines);
-        Assert.Equal(3, stable.AbandonedInitializations.Count);
-        Assert.DoesNotContain(stable.Baselines, value => value.InitializationPending);
-        Assert.False(Directory.Exists(targetRoot));
+        // This fixture intentionally supplies a synthetic one-byte volume snapshot, so
+        // the safety pipeline fails before target publication. The empty active baseline
+        // proves the existing file was not swallowed and remains an import delta on retry.
+        Assert.Empty(current.Entries);
     }
 
     [Fact]
-    public async Task Multiple_committed_identity_matches_fail_without_creating_or_mutating_card_state()
+    public async Task Multiple_committed_identity_matches_are_archived_by_confirmed_reset()
     {
         string sourceRoot = Path.Combine(_root, "duplicate-committed-card");
         Directory.CreateDirectory(Path.Combine(sourceRoot, "DCIM"));
@@ -1772,25 +1921,23 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
             sourceRoot, "duplicate-committed-volume", "NTFS", 1, DateTimeOffset.UtcNow));
         StandaloneRuntimeOperationResult initial = await runtime.RetryAsync(CancellationToken.None);
         Assert.True(GetProperty<bool>(GetProperty<object>(initial.Status, "failure")!, "canReinitializeCard"));
-        byte[] baselineBefore = await File.ReadAllBytesAsync(paths.CardInventoryBaselineFile);
-        byte[] identityBefore = await File.ReadAllBytesAsync(paths.CardIdentityFile);
-
         StandaloneRuntimeOperationResult firstRepair = await runtime.ReinitializeCurrentCardAsync(
-            true, CancellationToken.None);
-        StandaloneRuntimeOperationResult secondRepair = await runtime.ReinitializeCurrentCardAsync(
             true, CancellationToken.None);
 
         Assert.Equal("failure", GetProperty<string>(firstRepair.Status, "view"));
-        Assert.Contains("多个已提交", GetProperty<string>(
+        Assert.DoesNotContain("多个已提交", GetProperty<string>(
             GetProperty<object>(firstRepair.Status, "failure")!, "what"), StringComparison.Ordinal);
-        Assert.Equal(baselineBefore, await File.ReadAllBytesAsync(paths.CardInventoryBaselineFile));
-        Assert.Equal(identityBefore, await File.ReadAllBytesAsync(paths.CardIdentityFile));
-        Assert.Equal("failure", GetProperty<string>(secondRepair.Status, "view"));
         StandaloneInventoryBaselineDocument stable = Assert.IsType<StandaloneInventoryBaselineDocument>(
             await new AtomicJsonFileStore<StandaloneInventoryBaselineDocument>(paths.CardInventoryBaselineFile)
                 .LoadAsync(CancellationToken.None));
-        Assert.Equal(3, stable.Baselines.Count);
-        Assert.Empty(stable.AbandonedInitializations);
+        Assert.Single(stable.Baselines);
+        Assert.Equal(2, stable.ArchivedBaselines.Count);
+        Assert.Single(stable.AbandonedInitializations);
+        StandaloneCardIdentityMap resetIdentities = Assert.IsType<StandaloneCardIdentityMap>(
+            await new AtomicJsonFileStore<StandaloneCardIdentityMap>(paths.CardIdentityFile)
+                .LoadAsync(CancellationToken.None));
+        Assert.Single(resetIdentities.Bindings);
+        Assert.Equal(2, resetIdentities.ArchivedBindings.Count);
     }
 
     [Fact]
@@ -1884,17 +2031,21 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         Assert.False(Directory.Exists(targetRoot));
         IReadOnlyList<StandaloneInventoryBaseline> sourceBaselines = await baselineStore
             .FindAllBySourceIdentityAsync(sourceIdentity, CancellationToken.None);
-        StandaloneInventoryBaseline repaired = Assert.Single(
-            sourceBaselines, candidate => candidate.CardInstanceId != cardId);
-        Assert.Contains(sourceBaselines, candidate => candidate.CardInstanceId == cardId);
+        StandaloneInventoryBaseline repaired = Assert.Single(sourceBaselines);
         Assert.Equal(currentTemplateId, repaired.CameraTemplateId);
         Assert.Null(repaired.LastCompletedTaskId);
         Assert.Empty(repaired.Entries);
+        StandaloneInventoryBaselineDocument resetDocument = Assert.IsType<StandaloneInventoryBaselineDocument>(
+            await new AtomicJsonFileStore<StandaloneInventoryBaselineDocument>(paths.CardInventoryBaselineFile)
+                .LoadAsync(CancellationToken.None));
+        Assert.Contains(resetDocument.ArchivedBaselines, candidate => candidate.CardInstanceId == cardId);
         StandaloneConfiguration persisted = Assert.IsType<StandaloneConfiguration>(
             await configurationStore.LoadAsync(CancellationToken.None));
         Assert.Equal(currentTemplateId, persisted.CardProfiles.Single(
             profile => profile.CardInstanceId == repaired.CardInstanceId).CameraTemplateId);
-        Assert.Contains(persisted.CardProfiles, profile => profile.CardInstanceId == cardId);
+        if (repaired.CardInstanceId != cardId)
+            Assert.DoesNotContain(persisted.CardProfiles, profile => profile.CardInstanceId == cardId);
+        Assert.Contains(persisted.ArchivedCardProfiles, profile => profile.CardInstanceId == cardId);
     }
 
     [Fact]
@@ -1949,13 +2100,15 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
             true, CancellationToken.None);
         var repairedBaselines = await new StandaloneInventoryBaselineStore(paths.CardInventoryBaselineFile)
             .FindAllBySourceIdentityAsync(sourceIdentity, CancellationToken.None);
-        StandaloneInventoryBaseline baseline = Assert.Single(
-            repairedBaselines, candidate => candidate.CardInstanceId != oldCard.CardInstanceId);
+        StandaloneInventoryBaseline baseline = Assert.Single(repairedBaselines);
 
         Assert.Equal("failure", GetProperty<string>(repaired.Status, "view"));
-        Assert.NotEqual(oldCard.CardInstanceId, baseline.CardInstanceId);
+        Assert.Equal(oldCard.CardInstanceId, baseline.CardInstanceId);
         Assert.Empty(baseline.Entries);
-        Assert.Contains(repairedBaselines, candidate => candidate.CardInstanceId == oldCard.CardInstanceId);
+        StandaloneInventoryBaselineDocument resetDocument = Assert.IsType<StandaloneInventoryBaselineDocument>(
+            await new AtomicJsonFileStore<StandaloneInventoryBaselineDocument>(paths.CardInventoryBaselineFile)
+                .LoadAsync(CancellationToken.None));
+        Assert.Contains(resetDocument.ArchivedBaselines, candidate => candidate.CardInstanceId == oldCard.CardInstanceId);
         Assert.False(Directory.Exists(targetRoot));
     }
 
@@ -1994,7 +2147,7 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Failed_card_reinitialization_returns_terminal_recoverable_failure_instead_of_staying_preparing()
+    public async Task Failed_card_reinitialization_returns_terminal_recoverable_failure_and_releases_queue_lock()
     {
         string sourceRoot = Path.Combine(_root, "reinitialize-persistence-failure-card");
         string approvedRoot = Path.Combine(sourceRoot, "DCIM");
@@ -2033,7 +2186,7 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         Assert.True(GetProperty<bool>(failure, "canReinitializeCard"));
         Assert.Contains("重新初始化未完成", result.Message, StringComparison.Ordinal);
         Assert.False(Assert.IsType<bool>(GetPrivateField(runtime, "_stateRepairInProgress")));
-        Assert.True(Assert.IsType<bool>(GetPrivateField(runtime, "_currentVolumeBlocked")));
+        Assert.False(Assert.IsType<bool>(GetPrivateField(runtime, "_currentVolumeBlocked")));
         Assert.False(Directory.Exists(Path.Combine(_root, "reinitialize-persistence-failure-target")));
     }
 
@@ -2088,7 +2241,7 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task New_card_reinitialization_refuses_to_hide_a_cross_reader_unfinished_task_candidate()
+    public async Task New_card_reinitialization_archives_cross_reader_unfinished_task_and_becomes_usable()
     {
         string sourceRoot = Path.Combine(_root, "cross-reader-reinitialize-blocked-card");
         Directory.CreateDirectory(Path.Combine(sourceRoot, "DCIM"));
@@ -2137,16 +2290,16 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         StandaloneRuntimeOperationResult result = await runtime.ReinitializeCurrentCardAsync(
             true, CancellationToken.None);
 
-        Assert.Equal("failure", GetProperty<string>(result.Status, "view"));
-        Assert.Contains("仍有未完成任务", GetProperty<string>(
-            GetProperty<object>(result.Status, "failure")!, "title"), StringComparison.Ordinal);
+        Assert.Equal("baseline", GetProperty<string>(result.Status, "view"));
         Assert.True(File.Exists(paths.GetTaskJournalPath(unfinishedTaskId)));
-        Assert.False(File.Exists(paths.CardIdentityFile));
-        Assert.False(File.Exists(paths.CardInventoryBaselineFile));
+        Assert.Contains(unfinishedTaskId, await new StandaloneAbandonedTaskStore(paths.AbandonedTasksFile)
+            .GetTaskIdsAsync(CancellationToken.None));
+        Assert.True(File.Exists(paths.CardIdentityFile));
+        Assert.True(File.Exists(paths.CardInventoryBaselineFile));
     }
 
     [Fact]
-    public async Task Card_reinitialization_refuses_to_hide_an_unfinished_task()
+    public async Task Card_reinitialization_archives_unfinished_task_and_clears_the_blocker()
     {
         string sourceRoot = Path.Combine(_root, "reinitialize-blocked-card");
         Directory.CreateDirectory(Path.Combine(sourceRoot, "DCIM"));
@@ -2193,13 +2346,12 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         StandaloneRuntimeOperationResult result = await runtime.ReinitializeCurrentCardAsync(
             true, CancellationToken.None);
 
-        Assert.Equal("failure", GetProperty<string>(result.Status, "view"));
-        object failure = Assert.IsAssignableFrom<object>(GetProperty<object>(result.Status, "failure"));
-        Assert.True(GetProperty<bool>(failure, "canRestartFresh"));
-        Assert.False(GetProperty<bool>(failure, "canReinitializeCard"));
-        Assert.False(File.Exists(paths.CardInventoryBaselineFile));
-        Assert.False(File.Exists(paths.CardIdentityFile));
+        Assert.Equal("baseline", GetProperty<string>(result.Status, "view"));
+        Assert.True(File.Exists(paths.CardInventoryBaselineFile));
+        Assert.True(File.Exists(paths.CardIdentityFile));
         Assert.True(File.Exists(paths.GetTaskJournalPath(unfinishedTaskId)));
+        Assert.Contains(unfinishedTaskId, await new StandaloneAbandonedTaskStore(paths.AbandonedTasksFile)
+            .GetTaskIdsAsync(CancellationToken.None));
     }
 
     [Fact]
@@ -2681,7 +2833,9 @@ public sealed class StandaloneRuntimeOperationsTests : IAsyncLifetime
         StandaloneRuntimeOperationResult result = await runtime.RetryAsync(CancellationToken.None);
 
         Assert.Equal("baseline", GetProperty<string>(result.Status, "view"));
-        Assert.True(GetProperty<bool>(result.Status, "safeToRemoveCard"));
+        Assert.False(GetProperty<bool>(result.Status, "safeToRemoveCard"));
+        Assert.False(GetProperty<bool>(result.Status, "safeToClear"));
+        Assert.Equal("none", GetProperty<string>(result.Status, "verificationScope"));
         Assert.False(Directory.Exists(targetRoot));
         StandaloneCardIdentityMap persisted = Assert.IsType<StandaloneCardIdentityMap>(
             await new AtomicJsonFileStore<StandaloneCardIdentityMap>(paths.CardIdentityFile)

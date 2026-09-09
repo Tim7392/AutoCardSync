@@ -160,6 +160,43 @@ public sealed class StandaloneCompletedTaskCatalogTests : IDisposable
             $"{taskId:N}.json.corrupt-*.bak"));
     }
 
+    [Fact]
+    public async Task Locked_receipt_is_not_a_completed_candidate_and_does_not_block_resume()
+    {
+        var paths = new StandaloneDataPaths(_root);
+        Directory.CreateDirectory(paths.TasksDirectory);
+        Directory.CreateDirectory(paths.ReceiptsDirectory);
+        Guid taskId = Guid.NewGuid();
+        await new StandaloneTaskJournalStore(paths.GetTaskJournalPath(taskId)).InitializeAsync(
+            new StandaloneTaskJournal
+            {
+                TaskId = taskId,
+                SourceIdentity = "source-A",
+                CardInstanceId = Guid.NewGuid(),
+                TargetMode = StandaloneTargetMode.LocalOnly,
+                ManifestHash = "manifest-A",
+                LocalTargetIdentity = "local-A",
+                LocalTargetRoot = @"C:\Local",
+                NasTargetIdentity = string.Empty,
+                NasTargetRoot = string.Empty,
+                Files = [],
+                UpdatedAtUtc = DateTimeOffset.UtcNow,
+            },
+            CancellationToken.None);
+        string receiptPath = paths.GetCompletionReceiptPath(taskId);
+        await File.WriteAllTextAsync(receiptPath, "{}");
+        var catalog = new StandaloneCompletedTaskCatalog(paths);
+
+        using (new FileStream(receiptPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Empty(await catalog.FindCompletedCandidatesAsync("source-A", CancellationToken.None));
+            Assert.Null(await catalog.FindCompletedCandidateAsync(
+                "source-A", taskId, CancellationToken.None));
+            Assert.Equal(taskId, (await catalog.FindResumeCandidateAsync(
+                "source-A", CancellationToken.None))!.TaskId);
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using AutoCardSync.Application.Copying;
 using AutoCardSync.Application.Ingestion;
 using AutoCardSync.Application.Manifests;
@@ -124,7 +124,7 @@ public sealed class FrozenTransferFinalizerTests : IDisposable
         File.Delete(fixture.LocalTemp);
         await File.WriteAllBytesAsync(fixture.LocalTemp, new byte[fixture.Length]);
 
-        IOException exception = await Assert.ThrowsAsync<IOException>(() =>
+        IdentityChangedException exception = await Assert.ThrowsAsync<IdentityChangedException>(() =>
             new FrozenTransferFinalizer().FinalizeAsync(
                 fixture.ContentManifest,
                 fixture.SourceRoot,
@@ -132,6 +132,7 @@ public sealed class FrozenTransferFinalizerTests : IDisposable
                 fixture.Store,
                 CancellationToken.None));
 
+        Assert.Equal("frozen-recovery-temporary-verify", exception.Operation);
         Assert.Contains("identity changed", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.False(File.Exists(fixture.LocalFinal));
     }
@@ -321,7 +322,7 @@ public sealed class FrozenTransferFinalizerTests : IDisposable
     private static string FindRepositoryRoot()
     {
         DirectoryInfo? current = new(AppContext.BaseDirectory);
-        while (current is not null && !File.Exists(Path.Combine(current.FullName, "AutoCardSync.sln")))
+        while (current is not null && !File.Exists(Path.Combine(current.FullName, "AutoCardSync.Standalone.sln")))
             current = current.Parent;
         return current?.FullName ?? throw new DirectoryNotFoundException("Repository root was not found.");
     }

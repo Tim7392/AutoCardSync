@@ -109,6 +109,57 @@ public sealed class StandaloneConfigurationMigrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Auto_start_registry_failure_does_not_block_configuration_read()
+    {
+        string path = Path.Combine(_root, "autostart-unavailable.json");
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(path);
+        await store.SaveAsync(LegacyConfiguration() with { AutoStartOnLogin = true }, CancellationToken.None);
+        var service = new StandaloneConfigurationService(store, new FailingLoginAutoStartService());
+
+        StandaloneConfigurationDto dto = await service.GetAsync(CancellationToken.None);
+
+        Assert.True(dto.Configured);
+        Assert.True(dto.AutoStartOnLogin);
+        Assert.Contains("不会阻止插卡导入", dto.RecoveryNotice, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Auto_start_registry_failure_does_not_roll_back_a_saved_configuration()
+    {
+        string path = Path.Combine(_root, "autostart-save-unavailable.json");
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(path);
+        await store.SaveAsync(LegacyConfiguration() with { AutoStartOnLogin = true }, CancellationToken.None);
+        var service = new StandaloneConfigurationService(store, new FailingLoginAutoStartService());
+        StandaloneConfigurationDto current = await service.GetAsync(CancellationToken.None);
+
+        StandaloneConfigurationDto saved = await service.SaveAsync(
+            current with { AutoStartOnLogin = false }, CancellationToken.None);
+        StandaloneConfiguration persisted = Assert.IsType<StandaloneConfiguration>(
+            await store.LoadAsync(CancellationToken.None));
+
+        Assert.False(persisted.AutoStartOnLogin);
+        Assert.False(saved.AutoStartOnLogin);
+        Assert.Contains("不会阻止插卡导入", saved.RecoveryNotice, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task First_run_defaults_work_without_an_inserted_card_or_manual_extension_list()
+    {
+        string path = Path.Combine(_root, "first-run-defaults.json");
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(path);
+        var service = new StandaloneConfigurationService(store, new FailingLoginAutoStartService());
+
+        StandaloneConfigurationDto dto = await service.GetAsync(CancellationToken.None);
+
+        Assert.False(dto.Configured);
+        Assert.Equal(["."], dto.ApprovedSourceDirectories);
+        Assert.Equal("local-only", dto.TargetMode);
+        Assert.Contains(".wav", dto.ApprovedExtensions);
+        Assert.Contains(".cr3", dto.ApprovedExtensions);
+        Assert.Contains("不会阻止插卡导入", dto.RecoveryNotice, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Corrupt_configuration_is_preserved_and_returns_to_first_run_instead_of_blocking_startup()
     {
         string path = Path.Combine(_root, "configuration.json");
@@ -434,6 +485,8 @@ public sealed class StandaloneConfigurationMigrationTests : IDisposable
                 },
             ],
             AutoStartOnLogin = true,
+            LocalTargetPath = @"C:\Same",
+            NasMappedTargetPath = @"C:\Same",
         };
         await store.SaveAsync(stored, CancellationToken.None);
         var service = new StandaloneConfigurationService(store, new TestLoginAutoStartService());

@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Text.Json;
 using AutoCardSync.Application.Copying;
 using AutoCardSync.Domain.Manifests;
@@ -13,14 +13,42 @@ public sealed class StandaloneStatusProtocolTests
     private static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
 
     [Fact]
+    public void Metadata_baseline_alone_does_not_claim_verified_backup()
+    {
+        JsonElement status = Invoke("BaselineReadyStatus", "没有发现新增素材", "元数据与基线一致。");
+        Assert.False(status.GetProperty("safeToRemoveCard").GetBoolean());
+        Assert.False(status.GetProperty("safeToClear").GetBoolean());
+        Assert.Equal("none", status.GetProperty("verificationScope").GetString());
+    }
+
+    [Theory]
+    [InlineData(2, 1, false)]
+    [InlineData(2, 2, true)]
+    [InlineData(0, 0, false)]
+    public void Card_conclusion_requires_current_evidence_for_every_included_file(int included, int verified, bool expected)
+    {
+        object task = new { taskId = Guid.NewGuid(), totalFiles = 1, targetMode = "nas-only" };
+        JsonElement value = Invoke("WithVerificationScope", task, included, verified, true,
+            expected ? "verified-original-targets" : "incomplete");
+        Assert.Equal(expected, value.GetProperty("safeToClear").GetBoolean());
+        Assert.Equal(expected, value.GetProperty("safeToRemoveCard").GetBoolean());
+        Assert.True(value.GetProperty("taskVerified").GetBoolean());
+        Assert.Equal("nas-only", value.GetProperty("targetMode").GetString());
+        Assert.Equal(expected ? "current-inventory" : "task", value.GetProperty("verificationScope").GetString());
+        Assert.Equal("PASS", value.GetProperty("taskSafety").GetProperty("nasTargetFullRereadSha256").GetString());
+        Assert.Equal("NOT_REQUIRED", value.GetProperty("taskSafety").GetProperty("localTargetFullRereadSha256").GetString());
+    }
+
+    [Fact]
     public void Waiting_and_failure_statuses_match_the_web_contract()
     {
-        JsonElement waiting = Invoke("WaitingStatus", false, "请先完成首次设置");
+        JsonElement waiting = Invoke("WaitingStatus", false, "请先完成首次设置", null);
         Assert.Equal("waiting", waiting.GetProperty("view").GetString());
         Assert.False(waiting.GetProperty("configured").GetBoolean());
         Assert.Equal("waiting", waiting.GetProperty("phase").GetString());
 
-        JsonElement failure = Invoke("FailureStatus", "复制未完成", "目标不可用", false, false, false);
+        JsonElement failure = InvokeInstance(
+            "FailureStatus", "复制未完成", "目标不可用", false, false, false, false, null, null);
         Assert.Equal("failure", failure.GetProperty("view").GetString());
         Assert.Equal("复制未完成", failure.GetProperty("failure").GetProperty("title").GetString());
         Assert.Equal("目标不可用", failure.GetProperty("failure").GetProperty("what").GetString());
@@ -183,6 +211,9 @@ public sealed class StandaloneStatusProtocolTests
         manifest.Freeze();
 
         JsonElement status = Invoke("CompleteStatus", manifest, new StandaloneSafetyResult(true, []));
+        Assert.False(status.GetProperty("safeToRemoveCard").GetBoolean());
+        Assert.True(status.GetProperty("taskVerified").GetBoolean());
+        status = Invoke("WithVerificationScope", status, 1, 1, true, "verified-original-targets");
         Assert.Equal("complete", status.GetProperty("view").GetString());
         Assert.True(status.GetProperty("safeToRemoveCard").GetBoolean());
         Assert.Equal(1, status.GetProperty("completedFiles").GetInt32());
@@ -223,6 +254,9 @@ public sealed class StandaloneStatusProtocolTests
             manifest,
             new StandaloneSafetyResult(true, []),
             mode);
+
+        Assert.False(status.GetProperty("safeToClear").GetBoolean());
+        status = Invoke("WithVerificationScope", status, 1, 1, true, "verified-original-targets");
 
         Assert.Equal(expectedMode, status.GetProperty("targetMode").GetString());
         Assert.Equal(
@@ -318,6 +352,18 @@ public sealed class StandaloneStatusProtocolTests
 
         Assert.Equal("verifying-temporary", status.GetProperty("phase").GetString());
     }
+    private static JsonElement InvokeInstance(string methodName, params object?[] arguments)
+    {
+        MethodInfo method = typeof(StandaloneRuntimeService).GetMethod(
+            methodName,
+            BindingFlags.NonPublic | BindingFlags.Instance) ??
+            throw new InvalidOperationException($"Missing status method {methodName}.");
+        object instance = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(
+            typeof(StandaloneRuntimeService));
+        object value = method.Invoke(instance, arguments) ?? throw new InvalidOperationException("Status was null.");
+        return JsonSerializer.SerializeToElement(value, WebJson);
+    }
+
     private static JsonElement Invoke(string methodName, params object?[] arguments)
     {
         MethodInfo method = typeof(StandaloneRuntimeService).GetMethod(

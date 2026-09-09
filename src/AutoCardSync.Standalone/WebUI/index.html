@@ -38,8 +38,8 @@
       <div class="home standalone-home">
         <div class="home-content standalone-home-content">
           <div class="kicker">本地与团队存储 · 同步后完整校验</div>
-          <h1 class="hero-title waiting-title" id="homeTitle">插卡后，自动开始。</h1>
-          <p class="hero-sub">配置一次即可。AutoCardSync 会自动找到批准的素材，将每个文件保存到你选择的目标，并在完整校验结束后告诉你何时可以拔卡。</p>
+          <h1 class="hero-title waiting-title" id="homeTitle">先完成一次设置，再自动同步。</h1>
+          <p class="hero-sub" id="homeSub">先选择素材范围和保存位置。设置完成后，插卡会自动开始；完整校验结束后，应用会明确告诉你何时可以拔卡。</p>
 
           <div class="waiting-card glass glass-clear" aria-live="polite">
             <div class="waiting-visual" aria-hidden="true">
@@ -47,9 +47,9 @@
               <div class="waiting-rings"><i></i><i></i><i></i></div>
             </div>
             <div class="waiting-copy">
-              <span class="eyebrow" id="homeEyebrow">当前状态</span>
-              <h2 id="waitingHeadline">等待插入素材卡</h2>
-              <p id="waitingDescription">插卡后会自动开始，不需要点击“开始”。同步期间请保持素材卡和所选目标可用。</p>
+              <span class="eyebrow" id="homeEyebrow">需要完成首次配置</span>
+              <h2 id="waitingHeadline">先完成首次配置</h2>
+              <p id="waitingDescription">跟随首次引导完成素材范围和保存位置，AutoCardSync 才会开始等待插卡。</p>
               <div class="home-status">
                 <span class="status-inline"><i class="dot connecting" id="hostDot"></i><span id="hostLabel">正在连接桌面应用</span></span>
                 <span class="status-inline"><i class="dot" id="configurationDot"></i><span id="configurationLabel">正在读取设置</span></span>
@@ -99,11 +99,11 @@
             <div class="quick-copy">
               <span class="eyebrow">首次使用</span>
               <strong id="configurationSummary">尚未完成首次配置</strong>
-              <span id="configurationHint">设置素材目录、文件类型和两个保存目标后即可自动运行。</span>
+              <span id="configurationHint">设置素材目录、文件类型和你需要的保存位置后即可自动运行。</span>
             </div>
             <div class="quick-buttons">
               <button class="btn primary" id="openSetupBtn" type="button">完成首次配置</button>
-              <button class="btn secondary" id="manageCardsBtn" type="button">管理素材卡</button>
+              <button class="btn secondary" id="manageCardsBtn" type="button" hidden>管理素材卡</button>
               <button class="btn secondary" id="refreshHomeBtn" type="button">刷新状态</button>
             </div>
           </div>
@@ -252,12 +252,12 @@
       <div class="state-stage"><article class="state-card glass glass-regular success standalone-success">
         <div class="safe-radiance" aria-hidden="true"></div>
         <div class="state-icon safe-icon">✓</div>
-        <span class="eyebrow safe-eyebrow">安全完成</span>
-        <h2 id="completeTitle">可以安全拔卡</h2>
+        <span class="eyebrow safe-eyebrow" id="completeEyebrow">任务校验</span>
+        <h2 id="completeTitle">本次任务已完成校验</h2>
         <p id="completeMessage">所选保存目标已完成发布和最终校验。</p>
-        <div class="safe-seal"><span>100%</span><strong>已保存并校验</strong><small>这不是普通复制进度，而是最终安全结论</small></div>
+        <div class="safe-seal"><span>100%</span><strong>本次任务已校验</strong><small id="completeProofScope">历史素材需单独复核</small></div>
         <div class="safety-list compact-safety-list">
-          <div class="safety-row"><i>✓</i><strong>全部素材</strong><span id="completeFiles">清单中的文件全部有结果</span></div>
+          <div class="safety-row"><i>✓</i><strong>本次任务</strong><span id="completeFiles">任务中的文件全部有结果</span></div>
           <div class="safety-row"><i>✓</i><strong>本次素材范围</strong><span id="completeScope">此结论仅适用于本次纳入的素材目录和文件类型；其他文件不在此结论内。</span></div>
           <div class="safety-row" data-completion-target="local"><i>✓</i><strong>本地目标</strong><span id="completeLocal">最终文件完整校验通过</span></div>
           <div class="safety-row" data-completion-target="nas"><i>✓</i><strong>NAS 目标</strong><span id="completeNas">最终文件完整校验通过</span></div>
@@ -288,7 +288,7 @@
         <section class="onboarding-workspace">
           <form id="setupForm" novalidate>
             <div class="setup-step active" data-setup-step="0" aria-hidden="false">
-              <div class="wizard-step-head"><span class="eyebrow">第 1 步 / 共 4 步</span><h2>选择素材卡里的文件夹</h2><p>不用手动输入路径。点击下面的按钮，在 Windows 文件夹选择器中找到本次素材所在目录。</p></div>
+              <div class="wizard-step-head"><span class="eyebrow">第 1 步 / 共 4 步</span><h2>选择素材卡里的文件夹</h2><p>不用手动输入路径。可以选择当前卡里的某个文件夹，也可以选择整张卡的根目录；不能选择其他磁盘。</p></div>
               <div class="wizard-visual source-visual" aria-hidden="true"><div class="mini-card"><i></i><span>素材卡</span></div><div class="selection-beam"></div><div class="folder-symbol"><i></i></div></div>
               <div class="camera-template-panel wizard-field" aria-label="相机模板设置">
                 <div class="camera-template-heading"><div><span>相机模板</span><small>每种相机可以使用不同的素材目录和文件类型</small></div><strong id="defaultCameraTemplateStatus">默认模板</strong></div>
@@ -302,7 +302,7 @@
                 <span>已批准的素材文件夹</span>
                 <div class="source-folder-list" id="approvedSourceDirectoryList" aria-live="polite"></div>
                 <button class="btn primary source-picker-button" id="sourceFolderPickerBtn" type="button" data-picker="approvedSourceDirectories">打开 Windows 文件夹选择器</button>
-                <small>应用只保存素材卡内的相对位置，例如“XDROOT\Clip”，不会把其他磁盘当作源介质。</small>
+                <small>应用只保存当前卡内的相对位置，例如“XDROOT\Clip”；选择卡根目录时会保存为“.”，不会把其他磁盘当作源介质。</small>
               </div>
             </div>
 
@@ -329,8 +329,8 @@
             <div class="setup-step" data-setup-step="2" aria-hidden="true">
               <div class="wizard-step-head"><span class="eyebrow">第 3 步 / 共 4 步</span><h2>素材要保存到哪里？</h2><p>先选择保存方式。只有明确选择“双副本”，应用才会同时写入本机和 NAS。</p></div>
               <div class="target-mode-grid" role="radiogroup" aria-label="保存方式">
-                <label class="target-mode-card"><input type="radio" name="targetMode" value="nas-only" checked /><span><strong>只保存到 NAS</strong><small>适合团队素材直接进入共享盘</small></span></label>
-                <label class="target-mode-card"><input type="radio" name="targetMode" value="local-only" /><span><strong>只保存到本机</strong><small>适合离线工作或临时整理</small></span></label>
+                <label class="target-mode-card"><input type="radio" name="targetMode" value="nas-only" /><span><strong>只保存到 NAS</strong><small>适合团队素材直接进入共享盘</small></span></label>
+                <label class="target-mode-card"><input type="radio" name="targetMode" value="local-only" checked /><span><strong>只保存到本机</strong><small>无需 NAS 也能立即开始，之后可随时切换</small></span></label>
                 <label class="target-mode-card"><input type="radio" name="targetMode" value="local-and-nas" /><span><strong>本机 + NAS 双副本</strong><small>明确需要两份独立副本时选择</small></span></label>
               </div>
               <div class="destination-stack">

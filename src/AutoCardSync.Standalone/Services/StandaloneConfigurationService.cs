@@ -34,12 +34,21 @@ public sealed record StandaloneConfigurationDto
     public string DefaultCameraTemplateId { get; init; } = string.Empty;
     public IReadOnlyList<StandaloneCameraTemplateDto> CameraTemplates { get; init; } = [];
     public IReadOnlyList<StandaloneCardProfileDto> CardProfiles { get; init; } = [];
+    public IReadOnlyList<StandaloneCardProfileDto> ArchivedCardProfiles { get; init; } = [];
     public IReadOnlyList<StandaloneKnownCardDto> KnownCards { get; init; } = [];
     public string RecoveryNotice { get; init; } = string.Empty;
 }
 
 public sealed class StandaloneConfigurationService
 {
+    private static readonly string[] DefaultSourceDirectories = ["."];
+    private static readonly string[] DefaultMediaExtensions =
+    [
+        ".jpg", ".jpeg", ".png", ".heic",
+        ".mp4", ".mov", ".mxf", ".mts", ".m2ts", ".wav",
+        ".braw", ".r3d", ".crm", ".ari", ".arw", ".cr2", ".cr3",
+        ".nef", ".raf", ".dng", ".orf", ".rw2", ".xml", ".xmp",
+    ];
     private readonly AtomicJsonFileStore<StandaloneConfiguration> _store;
     private readonly LoginAutoStartService _autoStart;
     private readonly AutoCardSync.Standalone.Core.StandaloneDataPaths _paths;
@@ -94,10 +103,10 @@ public sealed class StandaloneConfigurationService
             }
 
             // Persisted configuration is authoritative across MSI repair and upgrade.
-            _autoStart.SetEnabled(configuration.AutoStartOnLogin);
+            bool autoStartOnLogin = ReconcileAutoStartBestEffort(configuration.AutoStartOnLogin);
             StandaloneConfigurationDto result = ToDto(configuration) with
             {
-                AutoStartOnLogin = _autoStart.IsEnabled(),
+                AutoStartOnLogin = autoStartOnLogin,
                 RecoveryNotice = _recoveryNotice ?? string.Empty,
             };
             return await WithKnownCardsAsync(result, configuration, cancellationToken);
@@ -139,16 +148,17 @@ public sealed class StandaloneConfigurationService
                 configuration = incoming with
                 {
                     CardProfiles = MergeCardProfiles(stored.CardProfiles, incoming.CardProfiles),
+                    ArchivedCardProfiles = stored.ArchivedCardProfiles,
                 };
             }
             configuration = ValidateAndNormalize(configuration);
             await _store.SaveAsync(configuration, cancellationToken);
-            _autoStart.SetEnabled(configuration.AutoStartOnLogin);
             _recoveryNotice = null;
+            bool autoStartOnLogin = ReconcileAutoStartBestEffort(configuration.AutoStartOnLogin);
             StandaloneConfigurationDto result = ToDto(configuration) with
             {
-                AutoStartOnLogin = _autoStart.IsEnabled(),
-                RecoveryNotice = string.Empty,
+                AutoStartOnLogin = autoStartOnLogin,
+                RecoveryNotice = _recoveryNotice ?? string.Empty,
             };
             return await WithKnownCardsAsync(result, configuration, cancellationToken);
         }
@@ -204,8 +214,8 @@ public sealed class StandaloneConfigurationService
             _recoveryNotice = null;
             return await WithKnownCardsAsync(ToDto(updated) with
             {
-                AutoStartOnLogin = _autoStart.IsEnabled(),
-                RecoveryNotice = string.Empty,
+                AutoStartOnLogin = ReadAutoStartBestEffort(updated.AutoStartOnLogin),
+                RecoveryNotice = _recoveryNotice ?? string.Empty,
             }, updated, cancellationToken);
         }
         finally
@@ -217,11 +227,11 @@ public sealed class StandaloneConfigurationService
     private StandaloneConfigurationDto CreateUnconfiguredDto() => new()
     {
         Configured = false,
-        ApprovedSourceDirectories = [],
-        ApprovedExtensions = [".jpg", ".jpeg", ".png", ".heic", ".mp4", ".mov", ".mxf", ".xml", ".xmp"],
-        TargetMode = "nas-only",
+        ApprovedSourceDirectories = DefaultSourceDirectories,
+        ApprovedExtensions = DefaultMediaExtensions,
+        TargetMode = "local-only",
         TargetNamingRule = "card-time-flat",
-        AutoStartOnLogin = _autoStart.IsEnabled(),
+        AutoStartOnLogin = ReadAutoStartBestEffort(fallback: false),
         RecoveryNotice = _recoveryNotice ?? string.Empty,
     };
 
@@ -278,7 +288,8 @@ public sealed class StandaloneConfigurationService
     public async Task<StandaloneConfiguration> RebindCardProfileAsync(
         Guid cardInstanceId,
         Guid cameraTemplateId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<Guid>? supersededCardInstanceIds = null)
     {
         if (cardInstanceId == Guid.Empty)
             throw new ArgumentException("Card instance identity is required.", nameof(cardInstanceId));
@@ -305,12 +316,18 @@ public sealed class StandaloneConfigurationService
                     CameraTemplateId = cameraTemplateId,
                 }
                 : existing with { CameraTemplateId = cameraTemplateId };
+            var resetCardIds = new HashSet<Guid>(supersededCardInstanceIds ?? []);
+            resetCardIds.Add(cardInstanceId);
+            StandaloneCardProfile[] archived = configuration.CardProfiles
+                .Where(profile => resetCardIds.Contains(profile.CardInstanceId))
+                .ToArray();
             StandaloneConfiguration updated = configuration with
             {
                 CardProfiles = configuration.CardProfiles
-                    .Where(profile => profile.CardInstanceId != cardInstanceId)
+                    .Where(profile => !resetCardIds.Contains(profile.CardInstanceId))
                     .Append(replacement)
                     .ToArray(),
+                ArchivedCardProfiles = configuration.ArchivedCardProfiles.Concat(archived).ToArray(),
             };
             updated = ValidateAndNormalize(updated);
             await _store.SaveAsync(updated, cancellationToken);
@@ -334,11 +351,12 @@ public sealed class StandaloneConfigurationService
             // that did not commit. Unlike normal settings saves, the snapshot
             // must replace temporary templates/profiles instead of merging them.
             await _store.SaveAsync(configuration, cancellationToken);
-            _autoStart.SetEnabled(configuration.AutoStartOnLogin);
+            _recoveryNotice = null;
+            bool autoStartOnLogin = ReconcileAutoStartBestEffort(configuration.AutoStartOnLogin);
             StandaloneConfigurationDto result = ToDto(configuration) with
             {
-                AutoStartOnLogin = _autoStart.IsEnabled(),
-                RecoveryNotice = string.Empty,
+                AutoStartOnLogin = autoStartOnLogin,
+                RecoveryNotice = _recoveryNotice ?? string.Empty,
             };
             return await WithKnownCardsAsync(result, configuration, cancellationToken);
         }
@@ -386,8 +404,8 @@ public sealed class StandaloneConfigurationService
             await _store.SaveAsync(updated, cancellationToken);
             StandaloneConfigurationDto result = ToDto(updated) with
             {
-                AutoStartOnLogin = _autoStart.IsEnabled(),
-                RecoveryNotice = string.Empty,
+                AutoStartOnLogin = ReadAutoStartBestEffort(updated.AutoStartOnLogin),
+                RecoveryNotice = _recoveryNotice ?? string.Empty,
             };
             return await WithKnownCardsAsync(result, updated, cancellationToken);
         }
@@ -481,7 +499,7 @@ public sealed class StandaloneConfigurationService
     {
         ArgumentNullException.ThrowIfNull(value);
         if (value.ApprovedSourceDirectories is null || value.ApprovedExtensions is null ||
-            value.CameraTemplates is null || value.CardProfiles is null ||
+            value.CameraTemplates is null || value.CardProfiles is null || value.ArchivedCardProfiles is null ||
             value.TargetMode is null || value.LocalTarget is null || value.NasMappedTarget is null ||
             value.TargetNamingRule is null || value.DefaultCameraTemplateId is null)
         {
@@ -516,6 +534,7 @@ public sealed class StandaloneConfigurationService
             DefaultCameraTemplateId = defaultId,
             CameraTemplates = templates,
             CardProfiles = value.CardProfiles.Select(ToProfile).ToArray(),
+            ArchivedCardProfiles = value.ArchivedCardProfiles.Select(ToProfile).ToArray(),
         };
     }
 
@@ -541,6 +560,12 @@ public sealed class StandaloneConfigurationService
                 ApprovedExtensions = template.NormalizedExtensions,
             }).ToArray(),
             CardProfiles = normalized.CardProfiles.Select(profile => new StandaloneCardProfileDto
+            {
+                CardInstanceId = profile.CardInstanceId.ToString("D"),
+                DisplayName = profile.DisplayName,
+                CameraTemplateId = profile.CameraTemplateId.ToString("D"),
+            }).ToArray(),
+            ArchivedCardProfiles = normalized.ArchivedCardProfiles.Select(profile => new StandaloneCardProfileDto
             {
                 CardInstanceId = profile.CardInstanceId.ToString("D"),
                 DisplayName = profile.DisplayName,
@@ -748,6 +773,45 @@ public sealed class StandaloneConfigurationService
                 TargetNamingRule.CardNameAndImportTime,
             _ => throw new InvalidDataException("目标命名规则无效。"),
         };
+
+    private bool ReconcileAutoStartBestEffort(bool desired)
+    {
+        try
+        {
+            _autoStart.SetEnabled(desired);
+            return _autoStart.IsEnabled();
+        }
+        catch (Exception exception) when (IsAutoStartFailure(exception))
+        {
+            AddAutoStartNotice();
+            return desired;
+        }
+    }
+
+    private bool ReadAutoStartBestEffort(bool fallback)
+    {
+        try
+        {
+            return _autoStart.IsEnabled();
+        }
+        catch (Exception exception) when (IsAutoStartFailure(exception))
+        {
+            AddAutoStartNotice();
+            return fallback;
+        }
+    }
+
+    private void AddAutoStartNotice()
+    {
+        const string notice = "设置已正常读取和保存，但 Windows 登录自动启动暂时无法同步；这不会阻止插卡导入，稍后可在设置中重试。";
+        if (string.IsNullOrWhiteSpace(_recoveryNotice))
+            _recoveryNotice = notice;
+        else if (!_recoveryNotice.Contains(notice, StringComparison.Ordinal))
+            _recoveryNotice = $"{_recoveryNotice} {notice}";
+    }
+
+    private static bool IsAutoStartFailure(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.Security.SecurityException;
 
     private static string ToUiRule(TargetNamingRule value) => "card-time-flat";
 }

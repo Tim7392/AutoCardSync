@@ -38,9 +38,49 @@ public sealed class StandaloneCompletedTaskCatalog(StandaloneDataPaths paths)
             if (!File.Exists(receiptPath))
                 continue;
 
-            StandaloneCompletionReceipt receipt =
-                await new AtomicJsonFileStore<StandaloneCompletionReceipt>(receiptPath).LoadAsync(cancellationToken) ??
-                throw new InvalidDataException($"Completion receipt '{receiptPath}' could not be loaded.");
+            StandaloneCompletionReceipt? receipt = await TryLoadReceiptAsync(receiptPath, cancellationToken);
+            if (receipt is null)
+                continue;
+            candidates.Add(new(journal, receipt));
+        }
+
+        return candidates
+            .OrderByDescending(candidate => candidate.Receipt.CompletedAtUtc)
+            .ThenByDescending(candidate => candidate.Journal.UpdatedAtUtc)
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<StandaloneCompletedTaskCandidate>>
+        FindCompletedCandidatesByCardInstanceIdAsync(
+            Guid cardInstanceId,
+            CancellationToken cancellationToken)
+    {
+        if (cardInstanceId == Guid.Empty)
+            throw new ArgumentException("Card instance identity is required.", nameof(cardInstanceId));
+        if (!Directory.Exists(_paths.TasksDirectory))
+            return [];
+
+        IReadOnlySet<Guid> abandonedTaskIds = await new StandaloneAbandonedTaskStore(
+            _paths.AbandonedTasksFile).GetTaskIdsAsync(cancellationToken);
+        var candidates = new List<StandaloneCompletedTaskCandidate>();
+        foreach (string path in EnumerateJournalLocations())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StandaloneTaskJournal? journal = await TryLoadJournalAsync(path, cancellationToken);
+            if (journal is null ||
+                abandonedTaskIds.Contains(journal.TaskId) ||
+                journal.CardInstanceId != cardInstanceId)
+            {
+                continue;
+            }
+
+            string receiptPath = _paths.GetCompletionReceiptPath(journal.TaskId);
+            if (!File.Exists(receiptPath))
+                continue;
+
+            StandaloneCompletionReceipt? receipt = await TryLoadReceiptAsync(receiptPath, cancellationToken);
+            if (receipt is null)
+                continue;
             candidates.Add(new(journal, receipt));
         }
 
@@ -78,9 +118,9 @@ public sealed class StandaloneCompletedTaskCatalog(StandaloneDataPaths paths)
             string receiptPath = _paths.GetCompletionReceiptPath(taskId);
             if (!File.Exists(receiptPath))
                 return null;
-            StandaloneCompletionReceipt receipt =
-                await new AtomicJsonFileStore<StandaloneCompletionReceipt>(receiptPath).LoadAsync(cancellationToken) ??
-                throw new InvalidDataException($"Completion receipt '{receiptPath}' could not be loaded.");
+            StandaloneCompletionReceipt? receipt = await TryLoadReceiptAsync(receiptPath, cancellationToken);
+            if (receipt is null)
+                return null;
             return new(journal, receipt);
         }
 
@@ -158,15 +198,54 @@ public sealed class StandaloneCompletedTaskCatalog(StandaloneDataPaths paths)
         catch (Exception exception) when (exception is JsonException or InvalidDataException)
         {
             _ = exception;
-            CorruptStateFileRecovery.Preserve(receiptPath);
+            TryPreserveInvalidReceipt(receiptPath);
+            return false;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            _ = exception;
             return false;
         }
 
         if (receipt is not null && StandaloneCompletionReceiptValidator.Evaluate(receipt, journal).IsValid)
             return true;
 
-        CorruptStateFileRecovery.Preserve(receiptPath);
+        TryPreserveInvalidReceipt(receiptPath);
         return false;
+    }
+
+    private static async Task<StandaloneCompletionReceipt?> TryLoadReceiptAsync(
+        string receiptPath,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await new AtomicJsonFileStore<StandaloneCompletionReceipt>(receiptPath)
+                .LoadAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+        {
+            // Missing, locked, or corrupt evidence cannot prove completion. Keep it untouched for audit.
+            return null;
+        }
+    }
+
+    private static void TryPreserveInvalidReceipt(string receiptPath)
+    {
+        try
+        {
+            if (File.Exists(receiptPath))
+                CorruptStateFileRecovery.Preserve(receiptPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // A concurrent delete/lock still means there is no trustworthy completion evidence.
+        }
     }
 
     private static async Task<StandaloneTaskJournal?> TryLoadJournalAsync(

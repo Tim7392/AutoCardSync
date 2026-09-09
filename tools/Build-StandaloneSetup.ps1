@@ -131,10 +131,16 @@ function Append-HarvestDirectory([System.Text.StringBuilder] $Builder, [string] 
         [void]$Builder.AppendLine("$Indent</Component>")
     }
 
-    $childDirs = $fileRows | Where-Object {
-        if ($RelativeDir.Length -eq 0) { $_.Directory.Length -gt 0 -and -not $_.Directory.Contains('/') }
-        else { $_.Directory.StartsWith($RelativeDir + '/', [StringComparison]::OrdinalIgnoreCase) -and ($_.Directory.Substring($RelativeDir.Length + 1) -notmatch '/') }
-    } | Select-Object -ExpandProperty Directory -Unique | Sort-Object
+    $prefix = if ($RelativeDir.Length -eq 0) { '' } else { $RelativeDir + '/' }
+    $childDirs = $fileRows | ForEach-Object {
+        if ($_.Directory.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $remainder = $_.Directory.Substring($prefix.Length)
+            if ($remainder.Length -gt 0) {
+                $segment = $remainder.Split('/')[0]
+                if ($RelativeDir.Length -eq 0) { $segment } else { $RelativeDir + '/' + $segment }
+            }
+        }
+    } | Select-Object -Unique | Sort-Object
 
     foreach ($child in $childDirs) {
         $name = if ($child.Contains('/')) { $child.Substring($child.LastIndexOf('/') + 1) } else { $child }
@@ -155,6 +161,12 @@ Append-HarvestDirectory $xml '' '      '
 [void]$xml.AppendLine('  </Fragment>')
 [void]$xml.AppendLine('  <Fragment>')
 [void]$xml.AppendLine('    <ComponentGroup Id="StandaloneFiles">')
+if ($componentRefs.Count -ne $fileRows.Count -or @($componentRefs | Select-Object -Unique).Count -ne $fileRows.Count) {
+    $referenced = @{}
+    foreach ($componentId in $componentRefs) { $referenced[$componentId] = $true }
+    $missing = @($fileRows | Where-Object { -not $referenced.ContainsKey($_.ComponentId) } | Select-Object -ExpandProperty Relative)
+    throw "Standalone harvest did not reference every published file. Published=$($fileRows.Count), referenced=$($componentRefs.Count), missing=$($missing -join '; ')"
+}
 foreach ($componentId in $componentRefs) {
     [void]$xml.AppendLine("      <ComponentRef Id=`"$componentId`" />")
 }

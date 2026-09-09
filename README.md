@@ -12,6 +12,15 @@ AutoCardSync Standalone is a Windows application for importing approved media fr
 - Treats unexpected card removal, source or target identity changes, unavailable destinations, and inconsistent recovery state as failures that require review.
 - Keeps local and NAS destinations as separate completion targets; an NAS copy is not assumed to be an independent backup merely because it is mapped on the same machine.
 
+## Card setup and incremental output
+
+- **Software initialization is non-destructive.** `card.initialize` establishes an empty import boundary without writing to the card. An empty selection remains registered without a backup conclusion; selected existing media on a nonempty card enters the normal copy and verification flow.
+- **Card settings are card-scoped.** Reconfiguring one recognized card changes that card's media selection profile without silently replacing global destination settings or another card's profile.
+- **New work is incremental.** Only media that is new, changed, or otherwise absent from the last successful baseline is copied.
+- **Destination changes apply to new work.** Historical material keeps each original task's target mode and destinations. Checking historical evidence reads those original copies and does not copy old material into newly selected destinations.
+- **Completion has an explicit scope.** A verified task covers its included files. Whole-card cleanup requires a fresh check of every currently approved file and its original required copies, including identities, lengths, and full hashes. Registration, reassociation, unchanged metadata, and old receipts alone do not establish this conclusion.
+- **Destination layout is flat for new tasks.** Each task uses a folder named `卡名 M.d-HH：mm`; files are written directly into that folder. Source directory segments are retained in the journal for identity and recovery, while schema-v3 `DestinationRelativePath` is the frozen single-level output name. Same-name files receive a stable suffix instead of overwriting one another. Legacy schema-v2 tasks keep their original destination paths during recovery.
+
 ## Scope and limitations
 
 - Current development target: Windows x64 with the .NET desktop runtime and Microsoft Edge WebView2 Runtime.
@@ -46,7 +55,7 @@ pwsh -NoProfile -File tools/Build-StandaloneSetup.ps1 `
 That route validates the pinned offline runtime prerequisites, builds the Standalone application and MSI, creates the Setup executable, and runs the repository's static bundle validator. The prerequisite binaries and generated artifacts are deliberately not committed.
 
 GitHub Actions runs the Standalone Core tests with Cobertura coverage collection, builds the Core,
-and runs the same static setup-validation route for `main`. Test/coverage output is retained as a CI
+and runs the same static setup-validation route for `main` and `v1-standalone`. Test/coverage output is retained as a CI
 artifact, but no coverage threshold is claimed until a reviewed baseline exists. Each setup artifact
 includes a manifest binding the built commit, requested version, and SHA-256 values. The manual
 candidate workflow creates **unsigned candidate evidence only**; it does not publish a GitHub Release,
