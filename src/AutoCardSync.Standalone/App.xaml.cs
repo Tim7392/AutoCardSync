@@ -55,12 +55,12 @@ public partial class App : System.Windows.Application
                 })
                 .Build();
 
-            await _host.StartAsync();
             MainWindow window = _host.Services.GetRequiredService<MainWindow>();
             MainWindow = window;
             _singleInstance.ListenForActivation(() =>
                 Dispatcher.BeginInvoke(window.ActivateFromSecondaryLaunch));
             window.Show();
+            await _host.StartAsync();
         }
         catch (Exception exception)
         {

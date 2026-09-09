@@ -3,6 +3,7 @@ using AutoCardSync.Application.Cards;
 using AutoCardSync.Domain.Manifests;
 using AutoCardSync.Infrastructure.Storage;
 using AutoCardSync.Standalone.Core.Cards;
+using AutoCardSync.Standalone.Core.Configuration;
 
 namespace AutoCardSync.Standalone.Core.Tests.Cards;
 
@@ -296,6 +297,33 @@ public sealed class StandaloneCardIdentityResolverTests : IDisposable
         Assert.Single(map.Bindings);
         Assert.Equal(repaired.CardInstanceId, map.Bindings[0].CardInstanceId);
         Assert.Single(Directory.EnumerateFiles(_root, "cards.json.corrupt-*.bak"));
+    }
+
+    [Fact]
+    public async Task Confirmed_reinitialization_archives_the_superseded_binding_and_keeps_one_active_identity()
+    {
+        Directory.CreateDirectory(_root);
+        string path = Path.Combine(_root, "reset-cards.json");
+        var resolver = new StandaloneCardIdentityResolver(path);
+        StandaloneCardIdentityResolution original = await resolver.ResolveAsync(
+            StrongEvidence(), CancellationToken.None);
+        Guid cardId = original.CardInstanceId!.Value;
+        CardIdentityEvidence replacement = StrongEvidence() with
+        {
+            Capacity = StrongEvidence().Capacity!.Value * 2,
+            RootDirectoryHash = new string('e', 64),
+            SampleFingerprint = new string('f', 64),
+        };
+
+        StandaloneCardIdentityResolution reset = await resolver.ReinitializeAsync(
+            replacement, cardId, CancellationToken.None, [cardId]);
+        StandaloneCardIdentityMap map = Assert.IsType<StandaloneCardIdentityMap>(
+            await new AtomicJsonFileStore<StandaloneCardIdentityMap>(path).LoadAsync(CancellationToken.None));
+
+        Assert.Equal(cardId, reset.CardInstanceId);
+        Assert.Equal(cardId, Assert.Single(map.Bindings).CardInstanceId);
+        Assert.Equal(replacement.Capacity, map.Bindings[0].Evidence.Capacity);
+        Assert.Equal(cardId, Assert.Single(map.ArchivedBindings).CardInstanceId);
     }
 
     [Fact]

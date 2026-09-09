@@ -178,6 +178,16 @@
         <File Id="fil_7D42E9F486BAB923" Name="WebView2Loader.dll" Source="..\..\artifacts\publish\Standalone\WebView2Loader.dll" />
         <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_71DA5935BC29C5C7" Type="integer" Value="1" KeyPath="yes" />
       </Component>
+      <Directory Id="dir_F863C39254D52F85" Name="runtimes">
+        <Directory Id="dir_F6E4EC3308F70083" Name="win-x64">
+          <Directory Id="dir_3D8E85175DCABAB0" Name="native">
+            <Component Id="cmp_D2E257B6377AF48E" Guid="{3424AD94-0DC0-2229-777A-B586D0C9DD09}">
+              <File Id="fil_DD7D7A0D21E98067" Name="WebView2Loader.dll" Source="..\..\artifacts\publish\Standalone\runtimes\win-x64\native\WebView2Loader.dll" />
+              <RegistryValue Root="HKCU" Key="Software\AutoCardSync\Standalone\Files" Name="cmp_D2E257B6377AF48E" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
       <Directory Id="dir_B822399090333E21" Name="WebUI">
         <Component Id="cmp_D7F2FFB026626E1D" Guid="{DBF9C49B-13C1-0F3A-A422-10D45FD7C09C}">
           <File Id="fil_A19D34AFAB561C6B" Name="index.html" Source="..\..\artifacts\publish\Standalone\WebUI\index.html" />
@@ -252,6 +262,7 @@
       <ComponentRef Id="cmp_2F4905E182714A9C" />
       <ComponentRef Id="cmp_C220DDCC01153CD1" />
       <ComponentRef Id="cmp_71DA5935BC29C5C7" />
+      <ComponentRef Id="cmp_D2E257B6377AF48E" />
       <ComponentRef Id="cmp_D7F2FFB026626E1D" />
       <ComponentRef Id="cmp_CF9AF52D6766C934" />
       <ComponentRef Id="cmp_02DF3CB8E63A9E05" />

@@ -114,6 +114,8 @@ public class ConflictException : IOException
 /// </summary>
 public class AtomicFilePublisher
 {
+    private const int MaximumHashMismatchRetries = 2;
+
     /// <summary>
     /// Publishes one temporary object without overwriting conflicting final content.
     /// </summary>
@@ -205,15 +207,51 @@ public class AtomicFilePublisher
                 };
             }
 
-            string tempHash = await ComputeSha256Async(
-                tempStream, expectedSize, temporaryVerificationProgress, ct);
-            if (!string.Equals(tempHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+            string tempHash = string.Empty;
+            int maximumVerificationAttempts = MaximumHashMismatchRetries + 1;
+            for (int verificationAttempt = 1;
+                 verificationAttempt <= maximumVerificationAttempts;
+                 verificationAttempt++)
             {
-                return new PublishResult
+                tempHash = await ComputeSha256Async(
+                    tempStream, expectedSize, temporaryVerificationProgress, ct);
+                if (string.Equals(tempHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                    break;
+
+                if (verificationAttempt == maximumVerificationAttempts)
                 {
-                    Success = false,
-                    Error = $"Hash mismatch: expected {expectedHash}, got {tempHash}",
-                };
+                    return new PublishResult
+                    {
+                        Success = false,
+                        Error = $"Hash mismatch after {verificationAttempt} verification attempts: " +
+                                $"expected {expectedHash}, got {tempHash}",
+                    };
+                }
+
+                // A retry rereads the same exclusively opened temporary object. Before each reread,
+                // fail closed if the target binding, file identity, or length has changed.
+                targetContinuityCheck?.Invoke();
+                openedTargetHandleCheck?.Invoke(tempHandle, normalizedTempPath);
+                FileIdentity retryIdentity = FileIdentity.GetFileIdentity(
+                    tempHandle, normalizedTempPath);
+                if (retryIdentity != verifiedTempIdentity)
+                {
+                    throw new IdentityChangedException(
+                        "temporary-hash-retry",
+                        normalizedTempPath,
+                        SourceHandleContinuityGuard.FormatFileId(verifiedTempIdentity),
+                        SourceHandleContinuityGuard.FormatFileId(retryIdentity),
+                        expectedSize,
+                        tempStream.Length);
+                }
+                if (tempStream.Length != expectedSize)
+                {
+                    return new PublishResult
+                    {
+                        Success = false,
+                        Error = $"Size changed before hash retry: expected {expectedSize}, got {tempStream.Length}",
+                    };
+                }
             }
 
             openedTargetHandleCheck?.Invoke(tempHandle, normalizedTempPath);

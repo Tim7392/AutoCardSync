@@ -65,6 +65,12 @@ jobs:
           $coverageFiles = @(Get-ChildItem -LiteralPath $resultsDirectory -Filter 'coverage.cobertura.xml' -File -Recurse)
           if ($coverageFiles.Count -eq 0) { throw 'Standalone Core tests completed without a Cobertura coverage file.' }
 
+      - name: Verify completion UI evidence scopes
+        shell: pwsh
+        run: |
+          node tools/Test-StandaloneCompletionUi.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Completion UI scope checks failed.' }
+
       - name: Upload Standalone Core test and coverage evidence
         if: ${{ always() && hashFiles('artifacts/coverage/standalone-core/**') != '' }}
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3

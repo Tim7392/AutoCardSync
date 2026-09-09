@@ -47,6 +47,66 @@ public sealed class AtomicJsonFileStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Save_retries_a_transient_destination_lock_without_losing_the_original()
+    {
+        Directory.CreateDirectory(_root);
+        string path = Path.Combine(_root, "config.json");
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(path);
+        StandaloneConfiguration first = Create(@"C:\First");
+        StandaloneConfiguration second = Create(@"C:\Second");
+        await store.SaveAsync(first, CancellationToken.None);
+
+        using var locked = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+        Task save = store.SaveAsync(second, CancellationToken.None);
+        await Task.Delay(175);
+        locked.Dispose();
+        await save;
+
+        AssertConfigurationEqual(second, (await store.LoadAsync(CancellationToken.None))!);
+        Assert.Empty(Directory.EnumerateFiles(_root, "*.tmp", SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
+    public async Task Persistent_destination_lock_preserves_original_and_cleans_failed_temporary_file()
+    {
+        Directory.CreateDirectory(_root);
+        string path = Path.Combine(_root, "config.json");
+        var store = new AtomicJsonFileStore<StandaloneConfiguration>(path);
+        StandaloneConfiguration first = Create(@"C:\First");
+        await store.SaveAsync(first, CancellationToken.None);
+
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            await Assert.ThrowsAnyAsync<IOException>(() =>
+                store.SaveAsync(Create(@"C:\Blocked"), CancellationToken.None));
+        }
+
+        AssertConfigurationEqual(first, (await store.LoadAsync(CancellationToken.None))!);
+        Assert.Empty(Directory.EnumerateFiles(_root, "*.tmp", SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
+    public async Task Load_removes_only_stale_guid_temporary_files_for_its_own_store()
+    {
+        Directory.CreateDirectory(_root);
+        string path = Path.Combine(_root, "config.json");
+        string stale = Path.Combine(_root, $".config.json.{Guid.NewGuid():N}.tmp");
+        string recent = Path.Combine(_root, $".config.json.{Guid.NewGuid():N}.tmp");
+        string unrelated = Path.Combine(_root, $".other.json.{Guid.NewGuid():N}.tmp");
+        await File.WriteAllTextAsync(stale, "stale");
+        await File.WriteAllTextAsync(recent, "recent");
+        await File.WriteAllTextAsync(unrelated, "unrelated");
+        File.SetLastWriteTimeUtc(stale, DateTime.UtcNow - TimeSpan.FromDays(2));
+
+        Assert.Null(await new AtomicJsonFileStore<StandaloneConfiguration>(path)
+            .LoadAsync(CancellationToken.None));
+
+        Assert.False(File.Exists(stale));
+        Assert.True(File.Exists(recent));
+        Assert.True(File.Exists(unrelated));
+    }
+
+    [Fact]
     public void Corrupt_directory_is_preserved_for_audit_before_regeneration()
     {
         string profile = Path.Combine(_root, "WebView2");

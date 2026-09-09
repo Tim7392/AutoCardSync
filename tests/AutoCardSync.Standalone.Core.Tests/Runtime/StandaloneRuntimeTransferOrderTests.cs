@@ -1,4 +1,4 @@
-﻿namespace AutoCardSync.Standalone.Core.Tests.Runtime;
+namespace AutoCardSync.Standalone.Core.Tests.Runtime;
 
 public sealed class StandaloneRuntimeTransferOrderTests
 {
@@ -12,20 +12,26 @@ public sealed class StandaloneRuntimeTransferOrderTests
     }
 
     [Fact]
-    public void Initial_baseline_returns_before_any_target_resolution_or_directory_creation()
+    public void New_card_boundary_is_persisted_before_target_resolution_and_empty_cards_return_without_target_io()
     {
         string source = ReadRuntimeSource();
-        int saveInitial = source.IndexOf("await baselineStore.SaveInitialAsync(", StringComparison.Ordinal);
-        int baselineReturn = source.IndexOf("return;", saveInitial, StringComparison.Ordinal);
-        int resolveTargets = source.IndexOf("ResolvedTargetRoots targetRoots = ResolveTargetRoots(", StringComparison.Ordinal);
-        int prepareTargetDirectory = source.IndexOf("localDomain = PrepareLocalTargetRoot(", StringComparison.Ordinal);
-        int resolveNas = source.IndexOf("secondaryTarget = ResolveSecondaryTarget(", StringComparison.Ordinal);
+        int newCardBranch = source.IndexOf("if (resumeCandidate is null && baseline is null)", StringComparison.Ordinal);
+        int persistPending = source.IndexOf("await baselineStore.ReinitializePendingAsync(", newCardBranch, StringComparison.Ordinal);
+        int commitBoundary = source.IndexOf("await baselineStore.CommitInitializationAsync(", persistPending, StringComparison.Ordinal);
+        int emptyCardBranch = source.IndexOf("if (fullInventory.TotalFiles == 0)", commitBoundary, StringComparison.Ordinal);
+        int emptyCardReturn = source.IndexOf("return;", emptyCardBranch, StringComparison.Ordinal);
+        int resolveTargets = source.IndexOf("ResolvedTargetRoots targetRoots = ResolveTargetRoots(", emptyCardReturn, StringComparison.Ordinal);
+        int prepareTargetDirectory = source.IndexOf("localDomain = PrepareLocalTargetRoot(", resolveTargets, StringComparison.Ordinal);
+        int resolveNas = source.IndexOf("secondaryTarget = ResolveSecondaryTarget(", resolveTargets, StringComparison.Ordinal);
 
-        Assert.True(saveInitial >= 0);
-        Assert.True(baselineReturn > saveInitial);
-        Assert.True(resolveTargets > baselineReturn);
-        Assert.True(prepareTargetDirectory > baselineReturn);
-        Assert.True(resolveNas > baselineReturn);
+        Assert.True(newCardBranch >= 0);
+        Assert.True(persistPending > newCardBranch);
+        Assert.True(commitBoundary > persistPending);
+        Assert.True(emptyCardBranch > commitBoundary);
+        Assert.True(emptyCardReturn > emptyCardBranch);
+        Assert.True(resolveTargets > emptyCardReturn);
+        Assert.True(prepareTargetDirectory > resolveTargets);
+        Assert.True(resolveNas > resolveTargets);
     }
 
     [Fact]
@@ -65,7 +71,7 @@ public sealed class StandaloneRuntimeTransferOrderTests
     private static string FindRepositoryRoot()
     {
         DirectoryInfo? current = new(AppContext.BaseDirectory);
-        while (current is not null && !File.Exists(Path.Combine(current.FullName, "AutoCardSync.sln")))
+        while (current is not null && !File.Exists(Path.Combine(current.FullName, "AutoCardSync.Standalone.sln")))
             current = current.Parent;
         return current?.FullName ?? throw new DirectoryNotFoundException("Repository root was not found.");
     }

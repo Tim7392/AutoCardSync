@@ -68,3 +68,4 @@ tests/AutoCardSync.Infrastructure.Tests/
 tools/*
 !tools/Build-StandaloneSetup.ps1
 !tools/Test-StandaloneSetupBundle.ps1
+!tools/Test-StandaloneCompletionUi.cjs

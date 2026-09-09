@@ -57,6 +57,11 @@
     paused: '已暂停'
   });
   const COMMON_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.heic', '.mp4', '.mov', '.mxf', '.xml', '.xmp']);
+  const DEFAULT_MEDIA_EXTENSIONS = [
+    '.jpg', '.jpeg', '.png', '.heic', '.mp4', '.mov', '.mxf', '.mts', '.m2ts', '.wav',
+    '.braw', '.r3d', '.crm', '.ari', '.arw', '.cr2', '.cr3', '.nef', '.raf', '.dng',
+    '.orf', '.rw2', '.xml', '.xmp'
+  ];
 
   const screens = new Map([...document.querySelectorAll('.screen')].map(node => [node.id, node]));
   const byId = id => document.getElementById(id);
@@ -287,10 +292,10 @@
     const template = {
       templateId: newRequestId(),
       name: `相机模板 ${cameraTemplates.length + 1}`,
-      approvedSourceDirectories: [],
+      approvedSourceDirectories: ['.'],
       approvedExtensions: source && source.approvedExtensions.length > 0
         ? [...source.approvedExtensions]
-        : ['.jpg', '.jpeg', '.mp4', '.mov']
+        : [...DEFAULT_MEDIA_EXTENSIONS]
     };
     cameraTemplates.push(template);
     if (wasEmpty || !defaultCameraTemplateId) defaultCameraTemplateId = template.templateId;
@@ -317,11 +322,13 @@
     const pending = pendingRequests.get(requestId);
     if (!pending) return;
     if (SENSITIVE_COMMAND_TYPES.has(pending.type)) {
-      pending.timedOut = true;
-      pending.timeoutId = 0;
-      byId('setupSubmitBtn').disabled = true;
+      pendingRequests.delete(requestId);
+      byId('setupSubmitBtn').disabled = false;
       byId('setupError').textContent =
-        '桌面应用仍可能正在保存设置，请勿重复提交。请保持应用打开并等待最终结果；如果长时间没有结果，请重启应用后先读取当前设置。';
+        '30 秒内没有收到最终结果。正在自动读取当前设置和运行状态；确认后可以直接重试，无需重启应用。';
+      postCommand('configuration.get');
+      postCommand('status.refresh');
+      showToast('操作结果暂未确认，已自动刷新状态；应用没有被锁住');
       return;
     }
     pendingRequests.delete(requestId);
@@ -378,13 +385,13 @@
         ? `调整“${cardContext.displayName}”的素材范围`
         : '让插卡后的工作自动完成。';
     byId('setupIntro').textContent = registeringNewCard
-      ? '只在软件中登记这张卡和素材范围，不格式化、不写入源卡；卡内已有文件只作为起始基线，不会被复制。'
+      ? '登记这张卡和素材范围后立即导入当前匹配素材。不会格式化或写入源卡。'
       : cardMode
         ? '只为这张卡选择素材位置和文件类型。保存位置、其他卡片和历史记录不会被一起改动。'
         : '跟着四个简单步骤选择素材范围和保存位置。完成后 AutoCardSync 会常驻托盘，插卡即开始。';
     byId('setupCancelBtn').textContent = cardMode ? '返回素材卡中心' : '返回首页';
     byId('setupSubmitBtn').textContent = registeringNewCard
-      ? '初始化此卡（不复制现有素材）'
+      ? '初始化并导入当前素材'
       : cardMode ? '保存此卡范围并重新检查' : '完成设置并开始检测';
   }
 
@@ -491,6 +498,17 @@
       try { validateSetupStep(currentSetupStep); }
       catch (exception) {
         error.textContent = exception instanceof Error ? exception.message : '请先完成当前步骤。';
+        const target = currentSetupStep === 0
+          ? byId('sourceFolderPickerBtn')
+          : currentSetupStep === 1
+            ? document.querySelector('[data-approved-extension]')
+            : currentSetupStep === 2
+              ? byId('targetMode')
+              : byId('setupSubmitBtn');
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          window.setTimeout(() => target.focus(), 0);
+        }
         return false;
       }
     }
@@ -1052,8 +1070,7 @@
           configuration,
           mountSessionId: pendingInsertedCardSetup.mountSessionId,
           cameraTemplateId: activeCameraTemplateId,
-          confirmed: true,
-          registerExistingOnly: true
+          confirmed: true
         };
       }
       byId('setupSubmitBtn').disabled = true;
@@ -1078,6 +1095,10 @@
     latestConfiguration = configuration;
     byId('configurationDot').classList.toggle('offline', !configured);
     byId('configurationLabel').textContent = configured ? '自动同步已配置' : '等待完成首次配置';
+    byId('homeTitle').textContent = configured ? '插卡后，自动开始。' : '先完成一次设置，再自动同步。';
+    byId('homeSub').textContent = configured
+      ? '配置一次即可。AutoCardSync 会自动找到批准的素材，将每个文件保存到你选择的目标，并在完整校验结束后告诉你何时可以拔卡。'
+      : '先选择素材范围和保存位置。设置完成后，插卡会自动开始；完整校验结束后，应用会明确告诉你何时可以拔卡。';
     byId('configurationSummary').textContent = configured ? '已准备好自动同步' : '尚未完成首次配置';
     byId('configurationHint').textContent = configured
       ? `${Array.isArray(configuration.knownCards) ? configuration.knownCards.length : Array.isArray(configuration.cardProfiles) ? configuration.cardProfiles.length : 0} 张已认识的素材卡 · ${Array.isArray(configuration.cameraTemplates) && configuration.cameraTemplates.length > 0 ? configuration.cameraTemplates.length : 1} 个素材范围`
@@ -1522,8 +1543,11 @@
   }
 
   function mediaIsComplete(item) {
-    return ['complete', 'completed'].includes(item.workState)
-      || ['approved_material_verified', 'backup_verified', 'safe_to_remove'].includes(item.safetyConclusion);
+    // A completed scan or persisted baseline is only an observation. The card
+    // belongs in the completed group only when the runtime supplied an explicit
+    // removal/verification conclusion. Software initialization deliberately has
+    // no backup conclusion and must remain visibly unfinished.
+    return ['approved_material_verified', 'backup_verified', 'safe_to_remove'].includes(item.safetyConclusion);
   }
 
   function mediaNeedsAttention(item) {
@@ -1569,6 +1593,7 @@
       matching_files: '已找到匹配素材',
       matching_files_found: '已找到匹配素材',
       no_matching_files: '当前范围没有匹配素材',
+      files_outside_scope: '发现未纳入当前范围的文件',
       no_approved_directory: '未找到批准的素材目录',
       approved_range_missing: '未找到批准的素材目录',
       inspection_failed: '无法读取素材范围',
@@ -1593,6 +1618,7 @@
       failed: '未安全完成'
     };
     if (item.presenceState === 'removed') return '卡已移除';
+    if (item.reasonCode === 'EMPTY_CARD_INITIALIZED') return '已检查，暂无素材';
     return labels[item.workState] || '正在处理';
   }
 
@@ -1601,6 +1627,7 @@
       approved_material_verified: '当前素材范围已备份并完整校验',
       backup_verified: '当前素材范围已备份并校验',
       safe_to_remove: '当前素材范围可安全移除',
+      task_verified: '本次任务已校验；历史素材未全部复核',
       keep_inserted: '请保持当前卡连接',
       no_backup_conclusion: '尚无安全结论'
     };
@@ -1630,6 +1657,9 @@
 
   function mediaDetailText(item) {
     if (mediaIsComplete(item)) return mediaCompletionMessage(item);
+    if (item.reasonCode === 'EMPTY_CARD_INITIALIZED') {
+      return '当前批准范围内没有发现素材；这不是备份完成结论，之后新增素材会按当前范围自动同步。';
+    }
     const parts = [mediaIdentityLabel(item), mediaEligibilityLabel(item), mediaWorkLabel(item)];
     if (item.queuePosition !== null && item.queuePosition > 0) {
       parts.push('队列第 ' + item.queuePosition + ' 位（一次只处理一张）');
@@ -1783,10 +1813,10 @@
     const template = {
       templateId: newRequestId(),
       name: templateName,
-      approvedSourceDirectories: [],
+      approvedSourceDirectories: ['.'],
       approvedExtensions: source && source.approvedExtensions.length > 0
         ? [...source.approvedExtensions]
-        : ['.jpg', '.jpeg', '.mp4', '.mov']
+        : [...DEFAULT_MEDIA_EXTENSIONS]
     };
     cameraTemplates.push(template);
     activeCameraTemplateId = template.templateId;
@@ -2347,7 +2377,8 @@
   }
 
   function renderBaseline(payload) {
-    if (payload.phase !== 'baseline-ready' || payload.baselinePersisted !== true || payload.safeToRemoveCard !== true) {
+    if (payload.phase !== 'baseline-ready' || payload.baselinePersisted !== true
+      || payload.verificationScope !== 'none' || payload.safeToClear !== false || payload.safeToRemoveCard !== false) {
       renderFailure(
         '素材卡初始化状态不完整',
         '桌面应用尚未提供完整的元数据基线持久化证据',
@@ -2360,12 +2391,25 @@
     byId('baselineTitle').textContent = safeText(payload.headline, '素材卡检查完成');
     byId('baselineMessage').textContent = safeText(payload.description, '已记录当前素材清单，今后仅同步新增素材。');
     byId('baselineInventory').textContent = safeText(payload.inventoryLabel, '当前批准目录和文件类型的清单已记录');
-    byId('baselineSafety').textContent = '本次元数据检查已经结束，可以安全拔卡';
+    byId('baselineSafety').textContent = '元数据检查已结束；没有备份完成或安全清理结论';
     showScreen('baseline');
   }
 
+  function completionEvidence(payload) {
+    if (!isPlainObject(payload)) return { taskComplete: false, wholeInventory: false };
+    const taskComplete = payload.taskVerified === true
+      && ['task', 'current-inventory'].includes(payload.verificationScope)
+      && safetyComplete({ ...payload, safety: payload.taskSafety });
+    const wholeInventory = taskComplete && payload.verificationScope === 'current-inventory'
+      && payload.safeToClear === true && payload.safeToRemoveCard === true
+      && Number.isInteger(payload.currentInventoryFiles) && payload.currentInventoryFiles > 0
+      && payload.verifiedCurrentFiles === payload.currentInventoryFiles;
+    return { taskComplete, wholeInventory };
+  }
+
   function renderComplete(payload) {
-    if (!safetyComplete(payload)) {
+    const { taskComplete, wholeInventory } = completionEvidence(payload);
+    if (!taskComplete || (payload.safeToClear === true && !wholeInventory)) {
       renderFailure(
         '安全完成条件尚未全部满足',
         '桌面应用请求显示完成页，但完整保存、最终校验或身份连续性证据不完整',
@@ -2378,6 +2422,11 @@
     const targetMode = normalizeTargetMode(payload.targetMode);
     const requiresLocal = targetMode !== 'nas-only';
     const requiresNas = targetMode !== 'local-only';
+    byId('complete').classList.toggle('partial-completion', !wholeInventory);
+    byId('completeTitle').textContent = wholeInventory ? '当前素材已完整复核' : '本次任务已完成校验';
+    byId('completeEyebrow').textContent = wholeInventory ? '当前范围已验证' : '本次任务已验证';
+    byId('completeProofScope').textContent = wholeInventory
+      ? '各批素材均按原保存要求复核' : '历史素材未全部复核，不能据此清理整卡';
     document.querySelector('[data-completion-target="local"]').hidden = !requiresLocal;
     document.querySelector('[data-completion-target="nas"]').hidden = !requiresNas;
     byId('completeMessage').textContent = safeText(payload.description, '所选保存目标已完成发布和最终校验。');
@@ -2387,9 +2436,9 @@
     byId('completeReceipt').textContent = safeText(payload.completionReceiptLabel, '本次完成记录已安全保存到本机');
     const completionMedia = currentCompletionMedia();
     const completionScope = completionMedia ? mediaScopeLabel(completionMedia) : '';
-    byId('completeScope').textContent = completionScope
-      ? `${completionScope}；本次完整备份与校验只覆盖此范围，其他目录和不匹配文件不在此结论内。`
-      : '本次完整备份与校验仅适用于纳入任务的素材目录和文件类型；其他文件不在此结论内。';
+    byId('completeScope').textContent = wholeInventory
+      ? `${completionScope || '当前批准范围'}：${payload.verifiedCurrentFiles} 个文件按各任务原目标复核；未纳入文件不在此结论内。`
+      : `本次任务 ${totalFiles} 个文件已校验。历史素材未全部复核，更换目标不自动回填旧素材。`;
     showScreen('complete');
   }
 
@@ -2500,7 +2549,7 @@
       pendingInsertedCardSetup = null;
       updateSetupModeCopy();
       openCardCenter();
-      showToast(safeText(response.message, '软件初始化完成；现有素材仅登记为基线，未复制。'));
+      showToast(safeText(response.message, '素材卡已初始化，当前匹配素材正在导入。'));
     }
     if (pending.type === 'configuration.save') {
       renderConfiguration(

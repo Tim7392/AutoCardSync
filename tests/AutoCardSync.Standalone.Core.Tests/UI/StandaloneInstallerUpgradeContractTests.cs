@@ -1,4 +1,4 @@
-﻿using System.Xml.Linq;
+using System.Xml.Linq;
 
 namespace AutoCardSync.Standalone.Core.Tests.UI;
 
@@ -87,7 +87,7 @@ public sealed class StandaloneInstallerUpgradeContractTests
         DirectoryInfo? current = new(AppContext.BaseDirectory);
         while (current is not null)
         {
-            if (File.Exists(Path.Combine(current.FullName, "AutoCardSync.sln")))
+            if (File.Exists(Path.Combine(current.FullName, "AutoCardSync.Standalone.sln")))
                 return current.FullName;
             current = current.Parent;
         }

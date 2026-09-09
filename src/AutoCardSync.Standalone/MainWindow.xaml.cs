@@ -6,11 +6,15 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Interop;
 using AutoCardSync.Agent.Service.Devices;
+using AutoCardSync.Infrastructure.FileSystem;
+using AutoCardSync.Infrastructure.Storage;
 using AutoCardSync.Standalone.Core;
 using AutoCardSync.Standalone.Core.Configuration;
+using AutoCardSync.Standalone.Core.Storage;
 using AutoCardSync.Standalone.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Win32.SafeHandles;
 using WinForms = System.Windows.Forms;
 
 namespace AutoCardSync.Standalone;
@@ -892,59 +896,111 @@ public partial class MainWindow : Window
 
     private void VerifyTargetWriteAccess(string targetDirectory, string purpose)
     {
-        string probePath = Path.Combine(targetDirectory, $".autocardsync-write-probe-{Guid.NewGuid():N}.tmp");
-        bool probeCreated = false;
-        Exception? writeFailure = null;
-        Exception? cleanupFailure = null;
         try
         {
-            using var stream = new FileStream(
-                probePath,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 256,
-                options: FileOptions.WriteThrough);
-            probeCreated = true;
-            byte[] probe = Guid.NewGuid().ToByteArray();
-            stream.Write(probe, 0, probe.Length);
-            stream.Flush(flushToDisk: true);
-            File.SetAttributes(probePath, File.GetAttributes(probePath) | FileAttributes.Hidden);
+            TargetWriteAccessProbe.Verify(
+                targetDirectory,
+                (handle, openedPath) => RejectMountedCardOverlap(handle, openedPath, purpose));
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidOperationException or NotSupportedException)
         {
-            writeFailure = exception;
-        }
-        finally
-        {
-            try
-            {
-                if (probeCreated)
-                    File.Delete(probePath);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-                cleanupFailure = exception;
-            }
-        }
-
-        if (cleanupFailure is not null)
-        {
-            _logger.LogError(cleanupFailure, "Storage write probe cleanup failed for {Purpose}.", purpose);
-            string detail = writeFailure is null
-                ? "写入验证后的临时检查文件无法清理。"
-                : "写入验证失败，且临时检查文件无法清理。";
-            throw new IOException(
-                $"{StoragePurposeLabel(purpose)}{detail}请检查权限或安全软件后重试。",
-                cleanupFailure);
-        }
-
-        if (writeFailure is not null)
-        {
+            _logger.LogError(exception, "Storage write probe failed for {Purpose}.", purpose);
             throw new IOException(
                 $"{StoragePurposeLabel(purpose)}不可写入。请检查权限、磁盘空间或网络连接后重试。",
-                writeFailure);
+                exception);
         }
+    }
+
+    private void RejectMountedCardOverlap(
+        SafeFileHandle openedTargetDirectory,
+        string selectedPath,
+        string purpose)
+    {
+        RejectMountedCardOverlap(selectedPath);
+
+        FileIdentity targetIdentity = FileIdentity.GetFileIdentity(openedTargetDirectory, selectedPath);
+        if (targetIdentity.VolumeSerialNumber == 0)
+            throw new InvalidDataException("无法确认保存位置与素材卡位于不同存储卷。请选择另一保存位置。");
+        var faultDomains = new FaultDomainResolver();
+        var targetDomain = purpose switch
+        {
+            "localTarget" => faultDomains.ResolveLocalDomain(openedTargetDirectory, selectedPath),
+            "nasMappedTarget" => ResolveOpenedMappedNasTarget(
+                openedTargetDirectory,
+                selectedPath,
+                faultDomains),
+            _ => throw new InvalidDataException("保存位置用途无效。"),
+        };
+
+        foreach (StandaloneMediaItemDto media in _runtimeService.GetMediaStatusSnapshot().Media)
+        {
+            if (string.Equals(media.PresenceState, "removed", StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(media.DriveLetter))
+            {
+                continue;
+            }
+
+            string cardRoot;
+            try
+            {
+                cardRoot = NormalizeDirectoryPath(Path.GetFullPath(media.DriveLetter));
+                FileIdentity cardIdentity = FileIdentity.GetFileIdentity(cardRoot);
+                if (cardIdentity.VolumeSerialNumber == 0 ||
+                    cardIdentity.VolumeSerialNumber == targetIdentity.VolumeSerialNumber ||
+                    faultDomains.AreSameFaultDomain(
+                        targetDomain,
+                        faultDomains.ResolveLocalDomain(cardRoot)))
+                {
+                    throw new InvalidDataException(
+                        $"不能将当前已挂载的素材卡 {MediaLabel(media)} 所在存储卷设为保存位置。请选择另一块本地磁盘或已映射的 NAS 盘符。");
+                }
+            }
+            catch (InvalidDataException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException or PathTooLongException)
+            {
+                _logger.LogError(
+                    exception,
+                    "Unable to prove storage-target isolation from mounted media {VolumeKey}.",
+                    media.VolumeKey);
+                throw new InvalidDataException(
+                    $"无法确认保存位置与当前已挂载的素材卡 {MediaLabel(media)} 相互隔离。请重新连接素材卡或选择另一保存位置。",
+                    exception);
+            }
+        }
+    }
+
+    private static FaultDomainInfo ResolveOpenedMappedNasTarget(
+        SafeFileHandle openedTargetDirectory,
+        string selectedPath,
+        FaultDomainResolver faultDomains)
+    {
+        var mappedResolver = new MappedNetworkTargetResolver();
+        MappedNetworkTargetIdentity mapped = mappedResolver.Capture(selectedPath);
+        var networkResolver = new NetworkStorageIdentityResolver();
+        NetworkStorageIdentity expected = networkResolver.Capture(mapped.LogicalUncPath);
+        if (!string.Equals(
+                mapped.StorageIdentity,
+                expected.StorageIdentity,
+                StringComparison.Ordinal))
+        {
+            throw new IOException("已映射 NAS 保存位置的物理身份在验证期间发生变化。");
+        }
+
+        FaultDomainInfo domain = faultDomains.ResolveNasDomain(
+            mapped.LogicalUncPath,
+            expected.PhysicalServer);
+        if (!string.Equals(domain.StorageIdentity, expected.StorageIdentity, StringComparison.Ordinal))
+            throw new IOException("已映射 NAS 保存位置的 SMB 身份在验证期间发生变化。");
+
+        networkResolver.EnsureOpenedRootHandleMatches(
+            openedTargetDirectory,
+            expected,
+            selectedPath);
+        return domain;
     }
 
     private static void RejectReparsePointPath(string path)
@@ -1058,18 +1114,20 @@ public partial class MainWindow : Window
             throw new InvalidDataException("所选素材卡当前不可访问，请保持插入后重试。");
         if (mountedCard is null)
         {
-            bool isExternal;
+            bool isExternal = false;
             try
             {
                 isExternal = new ExternalSourceVolumeClassifier().IsExternalStorage(new VolumeEventArgs(
                     volumeRoot, volumeRoot, drive.DriveFormat, drive.TotalSize, DateTimeOffset.UtcNow));
             }
-            catch (Exception exception)
+            catch (Exception)
             {
-                throw new InvalidDataException("无法确认所选文件夹属于外接素材卡，请从已插入素材卡进入配置。", exception);
+                // Some built-in SD readers do not expose usable WMI metadata. The same
+                // read-only media-shape fallback used by runtime detection keeps setup usable.
             }
+            isExternal = isExternal || StandaloneRuntimeService.LooksLikeMediaVolume(volumeRoot);
             if (!isExternal)
-                throw new InvalidDataException("首次设置的源目录必须来自素材卡；卡级配置会按当前挂载卡直接校验。");
+                throw new InvalidDataException("没有识别出常见素材卡结构。请确认选择的是素材卡，或从素材卡中心直接配置这张卡。");
         }
         if (mountedCard is not null && !string.Equals(
                 Path.GetPathRoot(selectedPath), Path.GetPathRoot(volumeRoot),

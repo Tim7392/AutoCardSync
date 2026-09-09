@@ -17,3 +17,10 @@ internal sealed class TestLoginAutoStartService(bool enabled = false) : LoginAut
         SetCount++;
     }
 }
+
+internal sealed class FailingLoginAutoStartService : LoginAutoStartService
+{
+    public override bool IsEnabled() => throw new InvalidOperationException("registry unavailable");
+
+    public override void SetEnabled(bool enabled) => throw new InvalidOperationException("registry unavailable");
+}

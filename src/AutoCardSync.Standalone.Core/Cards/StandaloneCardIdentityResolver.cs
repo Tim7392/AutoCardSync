@@ -17,6 +17,7 @@ public sealed record StandaloneCardIdentityMap
 {
     public int SchemaVersion { get; init; } = 1;
     public IReadOnlyList<StandaloneCardIdentityBinding> Bindings { get; init; } = [];
+    public IReadOnlyList<StandaloneCardIdentityBinding> ArchivedBindings { get; init; } = [];
 }
 
 public sealed record StandaloneCardIdentityResolution(
@@ -347,7 +348,8 @@ public sealed class StandaloneCardIdentityResolver
     public async Task<StandaloneCardIdentityResolution> ReinitializeAsync(
         CardIdentityEvidence observed,
         Guid? preferredCardInstanceId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<Guid>? supersededCardInstanceIds = null)
     {
         ValidateObserved(observed);
         if (preferredCardInstanceId == Guid.Empty)
@@ -372,9 +374,10 @@ public sealed class StandaloneCardIdentityResolver
             StandaloneCardIdentityBinding? preferred = preferredCardInstanceId is Guid preferredId
                 ? map.Bindings.SingleOrDefault(value => value.CardInstanceId == preferredId)
                 : null;
-            bool preservePreferred = preferredCardInstanceId is Guid &&
-                (preferred is null || MountedSnapshotCompatible(
-                    preferred.Evidence, observed.FileSystem ?? string.Empty, observed.Capacity ?? 0));
+            // Reinitialization is an explicit user-confirmed replacement of the active
+            // evidence boundary. Preserve the chosen logical card identity even when the
+            // old capacity/filesystem snapshot is exactly what became stale.
+            bool preservePreferred = preferredCardInstanceId is Guid;
             Guid selectedId = preservePreferred
                 ? preferredCardInstanceId!.Value
                 : Guid.NewGuid();
@@ -386,12 +389,18 @@ public sealed class StandaloneCardIdentityResolver
                 FirstSeenUtc = preferred?.FirstSeenUtc ?? now,
                 LastSeenUtc = now,
             };
+            var resetCardIds = new HashSet<Guid>(supersededCardInstanceIds ?? []);
+            resetCardIds.Add(selectedId);
+            StandaloneCardIdentityBinding[] archived = map.Bindings
+                .Where(value => resetCardIds.Contains(value.CardInstanceId))
+                .ToArray();
             StandaloneCardIdentityMap updated = map with
             {
                 Bindings = map.Bindings
-                    .Where(value => value.CardInstanceId != selectedId)
+                    .Where(value => !resetCardIds.Contains(value.CardInstanceId))
                     .Append(replacement)
                     .ToArray(),
+                ArchivedBindings = map.ArchivedBindings.Concat(archived).ToArray(),
             };
             await _store.SaveAsync(updated, cancellationToken);
             return new(
@@ -467,8 +476,15 @@ public sealed class StandaloneCardIdentityResolver
 
     private static void ValidateMap(StandaloneCardIdentityMap map)
     {
-        if (map.SchemaVersion != 1 || map.Bindings is null ||
+        if (map.SchemaVersion != 1 || map.Bindings is null || map.ArchivedBindings is null ||
             map.Bindings.Any(value =>
+                value is null ||
+                value.CardInstanceId == Guid.Empty ||
+                value.Evidence is null ||
+                value.FirstSeenUtc == default ||
+                value.LastSeenUtc == default ||
+                value.LastSeenUtc < value.FirstSeenUtc) ||
+            map.ArchivedBindings.Any(value =>
                 value is null ||
                 value.CardInstanceId == Guid.Empty ||
                 value.Evidence is null ||
@@ -480,6 +496,12 @@ public sealed class StandaloneCardIdentityResolver
             throw new InvalidDataException("The card identity map is invalid.");
         }
         foreach (StandaloneCardIdentityBinding binding in map.Bindings)
+        {
+            ValidateObserved(binding.Evidence);
+            if (binding.SafeCompletionEvidence is not null)
+                ValidateObserved(binding.SafeCompletionEvidence);
+        }
+        foreach (StandaloneCardIdentityBinding binding in map.ArchivedBindings)
         {
             ValidateObserved(binding.Evidence);
             if (binding.SafeCompletionEvidence is not null)

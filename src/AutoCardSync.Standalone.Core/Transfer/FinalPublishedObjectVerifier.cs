@@ -382,6 +382,16 @@ public sealed class FinalPublishedObjectLease : IAsyncDisposable
             targetRootCheck();
     }
 
+    /// <summary>Checks bindings while the verified read-only handles still prevent writes.</summary>
+    public void ValidateContinuity()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        foreach (Action targetRootCheck in _targetRootChecks)
+            targetRootCheck();
+        foreach (LeasedPublishedObject publishedObject in _objects)
+            publishedObject.ValidateContinuity();
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed)

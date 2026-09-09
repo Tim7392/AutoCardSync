@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.Text.Json;
 using AutoCardSync.Domain.Manifests;
 using AutoCardSync.Standalone.Core;
@@ -60,29 +60,40 @@ public sealed class CompletedTaskReuseTests : IDisposable
     }
 
     [Fact]
-    public void Runtime_completed_status_is_rebuilt_from_validated_persisted_candidate()
+    public async Task Runtime_requires_live_objects_after_structural_receipt_validation()
     {
         (_, StandaloneTaskJournal journal, StandaloneCompletionReceipt receipt) = CreateCompletedTask();
         MethodInfo method = typeof(AutoCardSync.Standalone.Services.StandaloneRuntimeService).GetMethod(
-            "RestoreCompletedStatus",
+            "RestoreCompletedStatusAsync",
             BindingFlags.NonPublic | BindingFlags.Static) ??
             throw new InvalidOperationException("Missing persisted completion status restorer.");
 
-        object value = method.Invoke(null,
+        var verification = (Task<FinalPublishedObjectLease>)method.Invoke(null,
         [
             new StandaloneCompletedTaskCandidate(journal, receipt),
             CurrentSnapshot(journal),
             journal.LocalTargetRoot,
             journal.NasTargetRoot,
-        ]) ?? throw new InvalidOperationException("Restored status was null.");
-        JsonElement status = JsonSerializer.SerializeToElement(
-            value,
-            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            Path.Combine(_root, "source"), CancellationToken.None, null, null,
+        ])!;
+        Assert.True(CompletedTaskReuseGuard.EvaluatePersisted(journal, receipt,
+            CurrentSnapshot(journal), journal.LocalTargetRoot, journal.NasTargetRoot).CanReuse);
+        await Assert.ThrowsAnyAsync<IOException>(async () => await verification);
+    }
 
-        Assert.Equal("complete", status.GetProperty("view").GetString());
-        Assert.Equal(journal.TaskId, status.GetProperty("taskId").GetGuid());
-        Assert.Equal(journal.Files.Count, status.GetProperty("totalFiles").GetInt32());
-        Assert.True(status.GetProperty("safeToRemoveCard").GetBoolean());
+    [Fact]
+    public async Task Runtime_rejects_persisted_completion_when_final_files_are_missing()
+    {
+        (_, StandaloneTaskJournal journal, StandaloneCompletionReceipt receipt) = CreateCompletedTask();
+        MethodInfo method = typeof(AutoCardSync.Standalone.Services.StandaloneRuntimeService).GetMethod(
+            "RestoreCompletedStatusAsync", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var verification = (Task<FinalPublishedObjectLease>)method.Invoke(null,
+        [
+            new StandaloneCompletedTaskCandidate(journal, receipt), CurrentSnapshot(journal),
+            journal.LocalTargetRoot, journal.NasTargetRoot,
+            Path.Combine(_root, "source"), CancellationToken.None, null, null,
+        ])!;
+        await Assert.ThrowsAnyAsync<IOException>(async () => await verification);
     }
 
     [Fact]
@@ -279,12 +290,14 @@ public sealed class CompletedTaskReuseTests : IDisposable
         journal.LocalTargetIdentity,
         journal.NasTargetIdentity);
 
-    private static (TaskManifest Manifest, StandaloneTaskJournal Journal, StandaloneCompletionReceipt Receipt)
+    private (TaskManifest Manifest, StandaloneTaskJournal Journal, StandaloneCompletionReceipt Receipt)
         CreateCompletedTask()
     {
         Guid taskId = Guid.NewGuid();
         Guid fileId = Guid.NewGuid();
         Guid cardId = Guid.NewGuid();
+        string localRoot = Path.Combine(_root, "local", taskId.ToString("N"));
+        string nasRoot = Path.Combine(_root, "synthetic-nas", taskId.ToString("N"));
         const string hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         var manifest = new TaskManifest(taskId);
         manifest.AddEntry(new ManifestEntry
@@ -304,7 +317,7 @@ public sealed class CompletedTaskReuseTests : IDisposable
             TargetRole = "local",
             TargetIdentity = "local-volume",
             TemporaryPath = string.Empty,
-            FinalPath = @"D:\target\task\XDROOT\Clip\sample.xml",
+            FinalPath = Path.Combine(localRoot, @"XDROOT\Clip\sample.xml"),
             FinalObjectIdentity = "local-object",
             ExpectedSha256 = hash,
             FinalSha256 = hash,
@@ -317,7 +330,7 @@ public sealed class CompletedTaskReuseTests : IDisposable
             TargetId = Guid.NewGuid(),
             TargetRole = "nas",
             TargetIdentity = "nas-share",
-            FinalPath = @"\\nas\share\task\XDROOT\Clip\sample.xml",
+            FinalPath = Path.Combine(nasRoot, @"XDROOT\Clip\sample.xml"),
             FinalObjectIdentity = "nas-object",
         };
         var journal = new StandaloneTaskJournal
@@ -327,9 +340,9 @@ public sealed class CompletedTaskReuseTests : IDisposable
             SourceIdentity = "source-volume",
             ManifestHash = manifest.ManifestHash,
             LocalTargetIdentity = "local-volume",
-            LocalTargetRoot = @"D:\target\task",
+            LocalTargetRoot = localRoot,
             NasTargetIdentity = "nas-share",
-            NasTargetRoot = @"\\nas\share\task",
+            NasTargetRoot = nasRoot,
             LocalCompletionReceiptPersisted = true,
             UpdatedAtUtc = DateTimeOffset.Parse("2026-07-24T00:01:00Z"),
             Files =

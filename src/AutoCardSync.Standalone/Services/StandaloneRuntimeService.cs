@@ -479,7 +479,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         finally
         {
             if (!handedOffToTransfer)
-                EndStateRepair(currentVolumeResolved: false);
+                EndStateRepair();
         }
     }
 
@@ -632,7 +632,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             {
                 lock (_gate)
                     _sourceCleanupReviewAuthorizedVolumeKeys.Remove(volumeKey);
-                EndStateRepair(currentVolumeResolved: false);
+                EndStateRepair();
             }
         }
     }
@@ -675,7 +675,6 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 : "这张素材卡已移除或状态已变化，未更改卡片身份或素材范围。");
 
         bool reinitializationAuthorized = false;
-        bool currentVolumeResolved = false;
         bool handedOffToTransfer = false;
         bool managedCardInitializationCommitted = false;
         try
@@ -683,8 +682,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             StandaloneConfiguration? configuration = await _configurationStore.LoadAsync(cancellationToken);
             if (configuration is null)
                 throw new InvalidDataException("首次设置未完成，不能初始化素材卡。");
-            if (!softwareInitialization && !configuration.Validate().IsValid)
-                throw new InvalidDataException("首次设置未完成，不能重新初始化素材卡。");
+            if (!configuration.Validate().IsValid)
+                throw new InvalidDataException("保存位置或素材范围尚未设置完整，不能初始化素材卡。请先补全设置后重试。");
             configuration = configuration.NormalizeForCurrentSchema();
             if (managedRebind)
             {
@@ -696,13 +695,10 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             }
 
             string sourceRoot = Path.GetFullPath(volume.DriveLetter);
-            if (!softwareInitialization)
-            {
-                EnsureNoOverlap(
-                    sourceRoot,
-                    configuration.TargetMode.RequiresLocal() ? configuration.LocalTargetPath : null,
-                    configuration.TargetMode.RequiresNas() ? configuration.NasMappedTargetPath : null);
-            }
+            EnsureNoOverlap(
+                sourceRoot,
+                configuration.TargetMode.RequiresLocal() ? configuration.LocalTargetPath : null,
+                configuration.TargetMode.RequiresNas() ? configuration.NasMappedTargetPath : null);
 
             var faultDomains = new FaultDomainResolver();
             FaultDomainInfo sourceDomain = faultDomains.ResolveLocalDomain(sourceRoot);
@@ -721,46 +717,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     ? _cardReassociationAuthorizedCardInstanceId
                     : null);
             }
-            StandaloneTaskJournal? crossReaderResume = suspectedHistoricalCardId is Guid historicalCardId
-                ? await taskCatalog.FindResumeCandidateByCardInstanceIdAsync(
-                    historicalCardId, cancellationToken)
-                : null;
-            if (!softwareInitialization && crossReaderResume is not null)
-            {
-                object blocked = FailureStatus(
-                    "仍有未完成任务",
-                    "重新初始化会掩盖未完成任务中的素材差分，因此已拒绝。请先重新检查恢复；若旧任务无法恢复，可保留旧记录并重新开始。",
-                    canRestartFresh: true);
-                SetTerminalStatus(blocked);
-                return new(blocked, "检测到未完成任务，未改动素材卡身份、档案或基线。");
-            }
-
             string volumeKey = VolumeKey(volume);
-            if (softwareInitialization)
-            {
-                var abandonedStore = new StandaloneAbandonedTaskStore(_paths.AbandonedTasksFile);
-                while (await taskCatalog.FindResumeCandidateAsync(sourceDomain.StorageIdentity!, cancellationToken)
-                    is StandaloneTaskJournal candidate)
-                {
-                    await abandonedStore.AbandonAsync(
-                        candidate.TaskId,
-                        candidate.SourceIdentity,
-                        "user_confirmed_software_initialization",
-                        cancellationToken);
-                }
-                if (suspectedHistoricalCardId is Guid softwareInitCardId)
-                {
-                    while (await taskCatalog.FindResumeCandidateByCardInstanceIdAsync(softwareInitCardId, cancellationToken)
-                        is StandaloneTaskJournal candidate)
-                    {
-                        await abandonedStore.AbandonAsync(
-                            candidate.TaskId,
-                            candidate.SourceIdentity,
-                            "user_confirmed_software_initialization",
-                            cancellationToken);
-                    }
-                }
-            }
             lock (_gate)
             {
                 reinitializationAuthorized = string.Equals(
@@ -845,11 +802,6 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 throw new InvalidDataException(
                     "当前插入介质与另一项未完成的素材卡初始化事务连续。系统拒绝把它绑定到你选择的历史卡；请先恢复或隔离那项初始化事务。");
             }
-            if (!softwareInitialization && matchingPending.Length > 1)
-            {
-                throw new InvalidDataException(
-                    "当前介质同时匹配多个未完成的初始化事务。系统没有覆盖或放弃其中任何一项；请保留状态文件并逐项恢复。");
-            }
             var cardResolver = new StandaloneCardIdentityResolver(_paths.CardIdentityFile);
             var matchingCommittedCards = new List<Guid>();
             foreach (StandaloneInventoryBaseline candidateBaseline in
@@ -925,57 +877,53 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 throw new InvalidDataException(
                     "当前插入介质已被可靠识别为另一张已初始化素材卡。系统拒绝把它绑定到你选择的卡片档案；请插入正确的卡后重试。");
             }
-            int distinctCommittedMatches = softwareInitialization ? 0 : managedRebind ? 0 : distinctCommittedCardIds.Length;
-            if (distinctCommittedMatches > 1)
-            {
-                throw new InvalidDataException(
-                    "当前素材卡同时匹配多个已提交的历史 CardId。系统没有新增、覆盖或隔离任何身份；请保留状态文件并选择具体历史卡后再继续。");
-            }
-            if (distinctCommittedMatches == 1)
-            {
-                Guid matchedCardId = distinctCommittedCardIds.Single();
-                _ = await cardResolver.ReinitializeAsync(
-                    observed,
-                    matchedCardId,
-                    cancellationToken);
-                lock (_gate)
-                {
-                    _currentVolumeBlocked = false;
-                    _cardReinitializationAuthorizedVolumeKey = null;
-                    _cardReinitializationAuthorizedSourceIdentity = null;
-                    _cardReassociationAuthorizedCardInstanceId = null;
-                    _cardReassociationAuthorizedPreviousSourceIdentity = null;
-                }
-                Task? restartedKnownCard = CompleteStateRepairAndStartTransfer(
-                    volume, forceReevaluation: true);
-                handedOffToTransfer = true;
-                if (restartedKnownCard is null)
-                {
-                    object unavailable = FailureStatus(
-                        "素材卡当前不可用",
-                        "已识别这张历史素材卡，但卡片已移除或应用正在退出；请重新插入后检查。其他卡的未完成初始化事务没有被改动。");
-                    SetTerminalStatus(unavailable);
-                    return new(unavailable, "未覆盖历史 CardId，也未改动其他卡的初始化事务；请重新插卡后继续。");
-                }
-                await restartedKnownCard.WaitAsync(cancellationToken);
-                object restartedKnownStatus = GetStatusSnapshot();
-                return new(restartedKnownStatus, ReevaluationMessage(
-                    restartedKnownStatus,
-                    "已按已知素材卡继续检查；其他卡的未完成初始化事务保持原样。"));
-            }
-
             Guid initializationCardId = managedCardInstanceId ??
-                (softwareInitialization && TryGetMountedCardInstanceId(volumeKey, out Guid currentCardId)
-                    ? currentCardId
+                (TryGetMountedConfirmedCardInstanceId(volumeKey, out Guid confirmedCurrentCardId)
+                    ? confirmedCurrentCardId
                     : matchingPending.Length == 1
                         ? matchingPending[0].CardInstanceId
-                        : Guid.NewGuid());
+                        : TryGetMountedCardInstanceId(volumeKey, out Guid currentCardId)
+                            ? currentCardId
+                        : distinctCommittedCardIds.Length == 1
+                            ? distinctCommittedCardIds[0]
+                            : suspectedHistoricalCardId
+                                ?? Guid.NewGuid());
+            Guid[] supersededCardIds = distinctCommittedCardIds
+                .Concat(matchingPending.Select(value => value.CardInstanceId))
+                .Append(initializationCardId)
+                .Distinct()
+                .ToArray();
+            var abandonedStore = new StandaloneAbandonedTaskStore(_paths.AbandonedTasksFile);
+            while (await taskCatalog.FindResumeCandidateAsync(sourceDomain.StorageIdentity!, cancellationToken)
+                is StandaloneTaskJournal sourceCandidate)
+            {
+                await abandonedStore.AbandonAsync(
+                    sourceCandidate.TaskId,
+                    sourceCandidate.SourceIdentity,
+                    "user_confirmed_card_reinitialization",
+                    cancellationToken);
+            }
+            foreach (Guid resetCardId in supersededCardIds
+                         .Concat(suspectedHistoricalCardId is Guid historicalCardId ? [historicalCardId] : [])
+                         .Distinct())
+            {
+                while (await taskCatalog.FindResumeCandidateByCardInstanceIdAsync(
+                    resetCardId, cancellationToken) is StandaloneTaskJournal staleCandidate)
+                {
+                    await abandonedStore.AbandonAsync(
+                        staleCandidate.TaskId,
+                        staleCandidate.SourceIdentity,
+                        "user_confirmed_card_reinitialization",
+                        cancellationToken);
+                }
+            }
             // The pending baseline is the mutation intent. Unrelated cards' unfinished
             // initialization transactions remain untouched and can be recovered independently.
             await _configurationService.RebindCardProfileAsync(
                 initializationCardId,
                 cameraTemplate.TemplateId,
-                cancellationToken);
+                cancellationToken,
+                supersededCardIds);
             await baselineStore.ReinitializePendingAsync(
                 initializationCardId,
                 cameraTemplate.TemplateId,
@@ -984,11 +932,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 observed,
                 abandonOtherPending: false,
                 cancellationToken,
-                archiveExistingCommittedBaseline: managedRebind || softwareInitialization);
+                archiveExistingCommittedBaseline: true,
+                supersededCardInstanceIds: supersededCardIds);
             StandaloneCardIdentityResolution card = await cardResolver.ReinitializeAsync(
                 observed,
                 initializationCardId,
-                cancellationToken);
+                cancellationToken,
+                supersededCardIds);
 
             if (card.CardInstanceId != initializationCardId)
                 throw new InvalidDataException("The card instance identity is unavailable.");
@@ -1013,28 +963,6 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 _cardReassociationAuthorizedPreviousSourceIdentity = null;
                 _contentWitnessInvalidatedVolumeKeys.Remove(volumeKey);
             }
-            if (softwareInitialization)
-            {
-                object registered = SoftwareInitializationStatus(
-                    cameraTemplate.Name,
-                    inventory.TotalFiles,
-                    "当前卡已在软件中登记；已有素材只记录为起始基线，未复制、未校验目标，也未写入或格式化源卡。保存位置恢复后，后续新增素材会自动同步。");
-                UpdateMedia(volumeKey, media => media with
-                {
-                    CardInstanceId = initializationCardId.ToString("D"),
-                    CameraTemplateId = cameraTemplate.TemplateId.ToString("D"),
-                    IdentityState = "known",
-                    WorkState = "initialized",
-                    SafetyConclusion = "no_backup_conclusion",
-                    ReasonCode = "CARD_SOFTWARE_INITIALIZED",
-                    PrimaryAction = "retry",
-                    Detail = "软件初始化完成；现有素材仅登记为基线，未复制。"
-                });
-                SetTerminalStatus(registered);
-                currentVolumeResolved = true;
-                return new(registered, "软件初始化完成；现有素材仅登记为基线，未复制。", managedCardInitializationCommitted);
-            }
-
             if (inventory.TotalFiles > 0)
             {
                 Task? restarted = CompleteStateRepairAndStartTransfer(volume, forceReevaluation: true);
@@ -1069,14 +997,33 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
 
             lock (_gate)
                 _safeCompletedVolumeKeys.Add(volumeKey);
-            currentVolumeResolved = true;
+            bool filesOutsideScope = inventory.ExcludedFiles > 0;
+            UpdateMedia(volumeKey, media => media with
+            {
+                CardInstanceId = initializationCardId.ToString("D"),
+                CameraTemplateId = cameraTemplate.TemplateId.ToString("D"),
+                IdentityState = "known_card",
+                EligibilityState = filesOutsideScope ? "files_outside_scope" : "no_matching_files",
+                WorkState = "completed",
+                SafetyConclusion = "no_backup_conclusion",
+                ReasonCode = filesOutsideScope ? "FILES_OUTSIDE_SELECTED_SCOPE" : "EMPTY_CARD_INITIALIZED",
+                PrimaryAction = filesOutsideScope ? "configure_card_scope" : string.Empty,
+                AvailableActions = filesOutsideScope ? ["configure_card_scope"] : [],
+                Detail = filesOutsideScope
+                    ? $"初始化已完成，但发现 {inventory.ExcludedFiles} 个文件类型不在当前素材范围内；可直接调整范围后重新检查。"
+                    : "已建立空卡档案；当前没有需要导入的素材。",
+            });
             object status = BaselineReadyStatus(
-                "空素材卡已初始化",
-                $"已按相机模板“{cameraTemplate.Name}”建立空基线。未读取素材内容、未写入保存目标；以后出现的第一批素材仍会作为新增内容复制。");
+                filesOutsideScope ? "素材卡已初始化，部分文件未纳入" : "空素材卡已初始化",
+                filesOutsideScope
+                    ? $"已按相机模板“{cameraTemplate.Name}”完成初始化；发现 {inventory.ExcludedFiles} 个未纳入文件，可调整素材范围后立即重新检查。"
+                    : $"已按相机模板“{cameraTemplate.Name}”建立空基线。未读取素材内容、未写入保存目标；以后出现的第一批素材仍会作为新增内容复制。");
             SetTerminalStatus(status);
             return new(
                 status,
-                "空素材卡初始化完成，可以继续使用。",
+                filesOutsideScope
+                    ? "素材卡初始化完成；未纳入文件已明确提示，调整范围后即可重新检查。"
+                    : "空素材卡初始化完成，可以继续使用。",
                 managedCardInitializationCommitted);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1109,7 +1056,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         finally
         {
             if (!handedOffToTransfer)
-                EndStateRepair(currentVolumeResolved);
+                EndStateRepair();
         }
     }
 
@@ -1526,7 +1473,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         finally
         {
             if (!handedOffToTransfer)
-                EndStateRepair(currentVolumeResolved: false);
+                EndStateRepair();
         }
     }
 
@@ -1628,10 +1575,10 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                             UpdateMediaNoLock(VolumeKey(volume), media => media with
                             {
                                 WorkState = "completed",
-                                SafetyConclusion = "approved_material_verified",
-                                ReasonCode = "SAFE_COMPLETION_REUSED",
+                                SafetyConclusion = "no_backup_conclusion",
+                                ReasonCode = "EMPTY_APPROVED_SCOPE",
                                 OverallPercent = 100,
-                                Detail = "已重新验证最近完成记录；本卡当前素材范围可以安全拔卡。",
+                                Detail = "当前批准范围内没有素材；元数据检查不构成备份完成证明。",
                             });
                         }
                         RaiseMediaStatusChanged();
@@ -1718,18 +1665,21 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
 
     private void RememberSafeCompletion(VolumeEventArgs volume)
     {
-        string volumeKey = VolumeKey(volume);
         lock (_gate)
-        {
-            _contentWitnessInvalidatedVolumeKeys.Remove(volumeKey);
-            _completionReverificationRequiredVolumeKeys.Remove(volumeKey);
-            _completionReverificationAuthorizedVolumeKeys.Remove(volumeKey);
-            _sourceCleanupReviewRequiredVolumeKeys.Remove(volumeKey);
-            _sourceCleanupReviewAuthorizedVolumeKeys.Remove(volumeKey);
-            _sourceCleanupReviewCardIds.Remove(volumeKey);
-            if (CanReuseSafeCompletion(volume))
-                _safeCompletedVolumeKeys.Add(volumeKey);
-        }
+            RememberSafeCompletionNoLock(volume);
+    }
+
+    private void RememberSafeCompletionNoLock(VolumeEventArgs volume)
+    {
+        string volumeKey = VolumeKey(volume);
+        _contentWitnessInvalidatedVolumeKeys.Remove(volumeKey);
+        _completionReverificationRequiredVolumeKeys.Remove(volumeKey);
+        _completionReverificationAuthorizedVolumeKeys.Remove(volumeKey);
+        _sourceCleanupReviewRequiredVolumeKeys.Remove(volumeKey);
+        _sourceCleanupReviewAuthorizedVolumeKeys.Remove(volumeKey);
+        _sourceCleanupReviewCardIds.Remove(volumeKey);
+        if (CanReuseSafeCompletion(volume))
+            _safeCompletedVolumeKeys.Add(volumeKey);
     }
 
     private async Task<bool> ShouldReevaluateSafeVolumeAsync(
@@ -1811,7 +1761,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             lock (_gate)
                 _contentWitnessInvalidatedVolumeKeys.Add(VolumeKey(volume));
         }
-        return contentWitnessMismatch;
+        // Metadata and a sample can invalidate previous evidence, but cannot renew it.
+        // Non-empty inventories always enter the serialized, cancellable object verification path.
+        return true;
     }
 
     private static async Task RefreshCardSafetyEvidenceAsync(
@@ -2011,7 +1963,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         return LooksLikeMediaVolume(volume.DriveLetter);
     }
 
-    private static bool LooksLikeMediaVolume(string driveLetter)
+    internal static bool LooksLikeMediaVolume(string driveLetter)
     {
         string root = Path.GetPathRoot(Path.GetFullPath(driveLetter)) ?? string.Empty;
         if (string.IsNullOrWhiteSpace(root) ||
@@ -2024,12 +1976,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 .Where(name => !string.IsNullOrWhiteSpace(name))
                 .Select(name => name!)
                 .ToArray();
-            if (directoryNames.Any(name => name.Equals("DCIM", StringComparison.OrdinalIgnoreCase) ||
-                                           name.Equals("PRIVATE", StringComparison.OrdinalIgnoreCase) ||
-                                           name.Equals("VIDEO", StringComparison.OrdinalIgnoreCase) ||
-                                           name.Equals("CLIPS", StringComparison.OrdinalIgnoreCase) ||
-                                           name.Equals("CONTENTS", StringComparison.OrdinalIgnoreCase) ||
-                                           name.Equals("AVCHD", StringComparison.OrdinalIgnoreCase)))
+            if (directoryNames.Any(IsRecognizedMediaDirectoryName))
                 return true;
             string[] mediaExtensions = [".mp4", ".mov", ".mxf", ".mts", ".m2ts", ".wav", ".jpg", ".jpeg", ".png", ".heic"];
             return Directory.EnumerateFiles(root, "*.*", SearchOption.TopDirectoryOnly)
@@ -2040,6 +1987,15 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             return false;
         }
     }
+
+    internal static bool IsRecognizedMediaDirectoryName(string name) =>
+        name.Equals("DCIM", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("PRIVATE", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("VIDEO", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("CLIPS", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("CONTENTS", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("AVCHD", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("XDROOT", StringComparison.OrdinalIgnoreCase);
 
     private void OnVolumeRemoved(object? sender, VolumeEventArgs volume)
     {
@@ -2163,7 +2119,17 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _logger.LogDebug(exception, "Mounted-volume reconciliation did not start a transfer.");
+            _logger.LogWarning(exception, "Mounted-volume reconciliation did not start a transfer; it will retry.");
+            bool idle;
+            lock (_gate)
+                idle = _activeTask is null or { IsCompleted: true };
+            if (idle)
+            {
+                SetStatus(WaitingStatus(
+                    configured: true,
+                    "素材卡检测暂时失败，正在自动重试",
+                    "无需重启应用。请保持素材卡连接；也可以点击重新检查立即再试。"));
+            }
         }
     }
 
@@ -2222,8 +2188,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
     private Task StartTransferNoLock(VolumeEventArgs volume, bool forceReevaluation)
     {
         string volumeKey = VolumeKey(volume);
-        if (forceReevaluation)
-            _safeCompletedVolumeKeys.Remove(volumeKey);
+        _safeCompletedVolumeKeys.Remove(volumeKey);
         _transferStatus.Stop();
         _lastPublishedProgressSequence = 0;
         _lastTransferStatusSnapshot = null;
@@ -2558,15 +2523,16 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     {
                         try
                         {
-                            object? verifiedCompletion = await TryRestoreCompletedStatusAsync(
+                            await using VerifiedCompletedStatus? verifiedCompletion = await TryRestoreCompletedStatusAsync(
                                 configuration,
                                 sourceRoot,
                                 tentativeBaseline,
                                 sourceDomain,
                                 faultDomains,
-                                cancellationToken);
-                            if (verifiedCompletion is not null)
+                                cancellationToken, fullInventory);
+                            if (verifiedCompletion is not null && HasCurrentInventoryProof(verifiedCompletion.Status))
                             {
+                                verifiedCompletion.ValidateContinuity();
                                 card = await cardResolver.ResolveExpectedAsync(
                                     expectedCardId,
                                     observed,
@@ -2923,7 +2889,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     CameraTemplateId = cameraTemplate.TemplateId.ToString("D"),
                     ExpectedDirectories = cameraTemplate.ApprovedSourceDirectories.ToArray(),
                     EligibilityState = fullInventory.TotalFiles == 0
-                        ? "no_matching_files"
+                        ? fullInventory.ExcludedFiles > 0 ? "files_outside_scope" : "no_matching_files"
                         : "matching_files_found",
                     SelectedFileCount = fullInventory.TotalFiles,
                     SelectedBytes = fullInventory.TotalBytes,
@@ -2934,11 +2900,21 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                         ? "no_backup_conclusion"
                         : "keep_inserted",
                     ReasonCode = fullInventory.TotalFiles == 0
-                        ? "EMPTY_CARD_INITIALIZED"
+                        ? fullInventory.ExcludedFiles > 0
+                            ? "FILES_OUTSIDE_SELECTED_SCOPE"
+                            : "EMPTY_CARD_INITIALIZED"
                         : "NEW_CARD_FULL_IMPORT_REQUIRED",
                     Detail = fullInventory.TotalFiles == 0
-                        ? "已建立空卡档案；当前没有需要备份的批准素材。"
+                        ? fullInventory.ExcludedFiles > 0
+                            ? $"已初始化，但发现 {fullInventory.ExcludedFiles} 个文件类型不在当前素材范围内；可直接调整范围后重新检查。"
+                            : "已建立空卡档案；当前没有需要备份的批准素材。"
                         : $"发现新素材卡，当前 {fullInventory.TotalFiles} 个批准素材将全部复制并完整校验。",
+                    PrimaryAction = fullInventory.TotalFiles == 0 && fullInventory.ExcludedFiles > 0
+                        ? "configure_card_scope"
+                        : string.Empty,
+                    AvailableActions = fullInventory.TotalFiles == 0 && fullInventory.ExcludedFiles > 0
+                        ? ["configure_card_scope"]
+                        : [],
                 });
                 if (fullInventory.TotalFiles == 0)
                 {
@@ -2953,8 +2929,10 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     RememberSafeCompletion(volume);
                     currentVolumeSafe = true;
                     SetOperationTerminalStatus(operationId, BaselineReadyStatus(
-                        "空素材卡已初始化",
-                        $"已按素材范围“{cameraTemplate.Name}”建立空基线；当前没有素材被复制。"));
+                        fullInventory.ExcludedFiles > 0 ? "素材卡已初始化，部分文件未纳入" : "空素材卡已初始化",
+                        fullInventory.ExcludedFiles > 0
+                            ? $"已按素材范围“{cameraTemplate.Name}”完成初始化；发现 {fullInventory.ExcludedFiles} 个未纳入文件，可调整范围后重新检查。"
+                            : $"已按素材范围“{cameraTemplate.Name}”建立空基线；当前没有素材被复制。"));
                     return;
                 }
             }
@@ -2996,46 +2974,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 throw new IOException(
                     $"检测到 {delta.MissingPaths.Count} 个历史素材已从卡中删除。系统没有把删除结果写入基线，也不会因此锁死这张卡；如果这些文件确实由你主动清理，请确认后继续。");
             }
-            if (sourceCleanupDetected &&
-                !fullReverificationAuthorized &&
-                baseline is { LastCompletedTaskId: not null } cleanupBaseline)
-            {
-                try
-                {
-                    object? completedStatus = await TryRestoreCompletedStatusAsync(
-                        configuration,
-                        sourceRoot,
-                        cleanupBaseline,
-                        sourceDomain,
-                        faultDomains,
-                        cancellationToken);
-                    if (completedStatus is null)
-                        throw new InvalidDataException("找不到最近完成任务的可验证回执。");
-                }
-                catch (Exception exception) when (
-                    exception is IOException or InvalidDataException or UnauthorizedAccessException)
-                {
-                    completionReverificationAvailable = true;
-                    throw new IOException(
-                        "已收到素材清理确认，但最近完成任务的目标证据无法重新验证。系统没有更新基线，也没有显示安全完成；可保留旧记录并按当前素材重新开始完整复制与校验。",
-                        exception);
-                }
-            }
-
-            // A cleanup plus new/changed material must produce one fresh receipt that covers
-            // every currently retained object. Otherwise the new delta receipt would replace
-            // the historical task id while proving only the newly copied subset.
-            bool cleanupRequiresFullReverification =
-                sourceCleanupDetected &&
-                sourceCleanupAuthorized &&
-                resumeCandidate is null &&
-                delta.TransferEntries.Count > 0;
+            // Retained material keeps its original backup requirements. Cleanup does not
+            // authorize copying historical files into the currently configured destinations.
             IReadOnlyList<ManifestEntry> transferEntries = IncludeContentWitnessTransferEntries(
                 fullInventory,
                 delta.TransferEntries,
                 contentWitnessInvalidated && resumeCandidate is null,
-                (fullReverificationAuthorized || cleanupRequiresFullReverification) &&
-                    resumeCandidate is null);
+                fullReverificationAuthorized && resumeCandidate is null);
             if (resumeCandidate is null && transferEntries.Count == 0)
             {
                 bool baselineNeedsRefresh = delta.MissingPaths.Count > 0 ||
@@ -3044,13 +2989,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 {
                     try
                     {
-                        object? completedStatus = await TryRestoreCompletedStatusAsync(
+                        await using VerifiedCompletedStatus? completedStatus = await TryRestoreCompletedStatusAsync(
                             configuration,
                             sourceRoot,
                             baseline,
                             sourceDomain,
                             faultDomains,
-                            cancellationToken);
+                            cancellationToken, fullInventory, card);
                         if (completedStatus is not null)
                         {
                             await RefreshCardSafetyEvidenceAsync(
@@ -3061,9 +3006,8 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                                 fullInventory,
                                 volume,
                                 cancellationToken);
-                            RememberSafeCompletion(volume);
-                            currentVolumeSafe = true;
-                            SetOperationTerminalStatus(operationId, completedStatus);
+                            currentVolumeSafe = CommitVerifiedCompletion(
+                                operationId, volume, completedStatus, cancellationToken);
                             return;
                         }
                     }
@@ -3106,15 +3050,6 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     }
                 }
 
-                await RefreshCardSafetyEvidenceAsync(
-                    cardResolver,
-                    card.CardInstanceId.Value,
-                    sourceRoot,
-                    sourceDomain,
-                    fullInventory,
-                    volume,
-                    cancellationToken);
-                RememberSafeCompletion(volume);
                 string headline = sourceCleanupDetected
                     ? "已确认素材清理"
                     : baselineNeedsRefresh
@@ -3124,7 +3059,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     ? $"已保留清理前的历史基线快照，并按你的确认移除 {delta.MissingPaths.Count} 个不再存在的历史路径。未读取已删除内容，也未写入保存目标。"
                     : baselineNeedsRefresh
                         ? $"已接受 {delta.IdentityChangedPaths.Count} 个仅文件系统标识变化的条目。未读取素材内容，也未写入保存目标。"
-                    : "批准目录中的文件元数据与已保存基线一致，可以安全拔卡。";
+                    : "批准目录中的文件元数据与已保存基线一致；历史备份尚未重新校验，不构成整卡安全清理结论。";
                 currentVolumeSafe = true;
                 SetOperationTerminalStatus(operationId, BaselineReadyStatus(headline, description));
                 return;
@@ -3474,14 +3409,29 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 fullInventory,
                 volume,
                 cancellationToken);
-            RememberSafeCompletion(volume);
-            currentVolumeSafe = true;
-            _logger.LogInformation(
-                "transfer.completed SafeToRemoveCard={SafeToRemoveCard}, CompletedFiles={CompletedFiles}, PayloadBytes={PayloadBytes}.",
-                safety.SafeToRemoveCard,
-                contentManifest.TotalFiles,
-                contentManifest.TotalBytes);
-            SetOperationTerminalStatus(operationId, CompleteStatusForMode(contentManifest, safety, targetMode));
+            // The final status is committed while every source and required target lease
+            // remains alive, including when this transfer covered the entire inventory.
+            try
+            {
+                StandaloneInventoryBaseline? completedBaseline = await baselineStore.FindByCardInstanceIdAsync(
+                    card.CardInstanceId.Value, cancellationToken);
+                await using VerifiedCompletedStatus? verifiedCompletion = await TryRestoreCompletedStatusAsync(
+                    configuration, sourceRoot, completedBaseline, sourceDomain,
+                    faultDomains, cancellationToken, fullInventory, card);
+                if (verifiedCompletion is not null)
+                {
+                    currentVolumeSafe = CommitVerifiedCompletion(
+                        operationId, volume, verifiedCompletion, cancellationToken);
+                    return;
+                }
+            }
+            catch (Exception exception) when (IsCandidateRecoveryException(exception))
+            {
+                completionReverificationAvailable = true;
+                throw new IOException("任务记录已保留，但当前实物复核未通过，不能恢复安全完成状态。", exception);
+            }
+            completionReverificationAvailable = true;
+            throw new IOException("任务记录已保留，但缺少当前实物复核结果，不能恢复安全完成状态。");
         }
         catch (OperationCanceledException)
         {
@@ -3557,11 +3507,10 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         lock (_gate)
         {
             _activeTask = null;
-            bool failedVolumeStillMounted = string.Equals(
-                _activeVolumeKey, failedVolumeKey, StringComparison.OrdinalIgnoreCase);
-            _currentVolumeBlocked = failedVolumeStillMounted;
-            startPending = !failedVolumeStillMounted &&
-                !_configurationChangeInProgress &&
+            if (string.Equals(_activeVolumeKey, failedVolumeKey, StringComparison.OrdinalIgnoreCase))
+                _activeVolumeKey = null;
+            _currentVolumeBlocked = false;
+            startPending = !_configurationChangeInProgress &&
                 !_stopping &&
                 _pendingVolumes.Count > 0;
         }
@@ -3644,13 +3593,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                     completedInventory,
                     journal.Files.ToDictionary(file => file.FileId, file => file.SourceSha256));
                 ManifestJournalBindingValidator.EnsureValid(contentManifest, journal);
-                _ = RebuildCompletedStatus(
+                await using FinalPublishedObjectLease recoveredLease = await AcquireCompletedTaskLeaseAsync(
                     configuration,
                     sourceRoot,
                     currentBaseline.CardInstanceId,
                     sourceDomain,
                     faultDomains,
-                    candidate);
+                    candidate, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -3700,46 +3649,134 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         exception is IOException or InvalidDataException or UnauthorizedAccessException or
             ArgumentException or InvalidOperationException or NotSupportedException or
             System.Security.SecurityException or System.Text.Json.JsonException;
-    private async Task<object?> TryRestoreCompletedStatusAsync(
+    private sealed class VerifiedCompletedStatus(object status, List<FinalPublishedObjectLease> leases) : IAsyncDisposable
+    {
+        private bool _disposed;
+        public object Status { get; } = status;
+
+        public void ValidateContinuity()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            foreach (FinalPublishedObjectLease lease in leases)
+                lease.ValidateContinuity();
+        }
+
+        public void Commit(Action<object> publish, CancellationToken cancellationToken)
+        {
+            ValidateContinuity();
+            cancellationToken.ThrowIfCancellationRequested();
+            publish(Status);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            for (int index = leases.Count - 1; index >= 0; index--)
+                await leases[index].DisposeAsync();
+        }
+    }
+
+    private async Task<VerifiedCompletedStatus?> TryRestoreCompletedStatusAsync(
         StandaloneConfiguration configuration,
         string sourceRoot,
         StandaloneInventoryBaseline? baseline,
         FaultDomainInfo sourceDomain,
         FaultDomainResolver faultDomains,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TaskManifest currentInventory,
+        StandaloneCardIdentityResolution? currentCardBinding = null)
     {
-        if (baseline?.LastCompletedTaskId is not Guid completedTaskId)
+        if (baseline is null)
             return null;
 
-        var catalog = new StandaloneCompletedTaskCatalog(_paths);
-        StandaloneCompletedTaskCandidate? candidate = await catalog.FindCompletedCandidateAsync(
-            sourceDomain.StorageIdentity!,
-            completedTaskId,
-            cancellationToken);
-        if (candidate is null)
-            throw new IOException("最近完成任务的 Journal 或 Receipt 缺失，不能恢复安全完成状态。");
+        if (currentInventory.TotalFiles == 0)
+            return new VerifiedCompletedStatus(BaselineReadyStatus("当前范围没有素材", "当前没有可复核的素材；历史记录仍保留，不构成备份完成结论。"), []);
 
-        return RebuildCompletedStatus(
-            configuration,
-            sourceRoot,
-            baseline.CardInstanceId,
-            sourceDomain,
-            faultDomains,
-            candidate);
+        var catalog = new StandaloneCompletedTaskCatalog(_paths);
+        CompletedTaskSourceRebindingAuthorization? rebinding =
+            currentCardBinding is { NeedsConfirmation: false, CardInstanceId: not null } &&
+            currentCardBinding.CardInstanceId == baseline.CardInstanceId &&
+            string.Equals(baseline.SourceIdentity, sourceDomain.StorageIdentity, StringComparison.Ordinal)
+                ? new(baseline.CardInstanceId, sourceDomain.StorageIdentity!) : null;
+        IReadOnlyList<StandaloneCompletedTaskCandidate> history = rebinding is not null
+            ? await catalog.FindCompletedCandidatesByCardInstanceIdAsync(baseline.CardInstanceId, cancellationToken)
+            : await catalog.FindCompletedCandidatesAsync(sourceDomain.StorageIdentity!, cancellationToken);
+        StandaloneCompletedTaskCandidate? candidate = baseline.LastCompletedTaskId is Guid completedTaskId
+            ? history.FirstOrDefault(item => item.Journal.TaskId == completedTaskId)
+            : history.FirstOrDefault();
+        if (candidate is null && baseline.LastCompletedTaskId is not null)
+            throw new IOException("最近完成任务的 Journal 或 Receipt 缺失，不能恢复安全完成状态。");
+        if (candidate is null)
+            return null;
+        CompletedInventoryEvidencePlan coverage = CompletedInventoryEvidencePlanner.Create(
+            currentInventory, baseline.CardInstanceId, sourceDomain.StorageIdentity!,
+            new[] { candidate }.Concat(history.Where(item => item.Journal.TaskId != candidate.Journal.TaskId)).ToArray(), rebinding);
+        if (coverage.Groups.Count == 0)
+            return null;
+        // The most recent task may contain only files the user has already removed.
+        // Display an actual current evidence group; never count a removed file as covered.
+        candidate = coverage.Groups[0].Candidate;
+        var leases = new List<FinalPublishedObjectLease>();
+        int verifiedFiles = 0;
+        int taskFiles = 0;
+        try
+        {
+            // Select the newest matching evidence for each current object. A task retains its
+            // original mode and roots; changing configuration never backfills historical files.
+            foreach (CompletedInventoryEvidenceGroup group in coverage.Groups)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                StandaloneCompletedTaskCandidate item = group.Candidate;
+                IReadOnlySet<string> included = group.RelativePaths;
+                try
+                {
+                    leases.Add(await AcquireCompletedTaskLeaseAsync(
+                        configuration, sourceRoot, baseline.CardInstanceId, sourceDomain,
+                        faultDomains, item, cancellationToken, included, rebinding));
+                }
+                catch (Exception exception) when (item.Journal.TaskId != candidate.Journal.TaskId &&
+                    IsCandidateRecoveryException(exception))
+                {
+                    // An unavailable historical group leaves an explicit scope gap. It never
+                    // broadens the newly completed task or changes its original requirements.
+                    _logger.LogWarning("Historical group verification unavailable: {ErrorType}.",
+                        exception.GetType().Name);
+                    continue;
+                }
+                if (item.Journal.TaskId == candidate.Journal.TaskId)
+                    taskFiles = included.Count;
+                verifiedFiles += included.Count;
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            // All verified objects remain locked while the combined conclusion is formed.
+            foreach (FinalPublishedObjectLease lease in leases)
+                lease.ValidateContinuity();
+            object status = CompleteStatusFromPersisted(candidate.Journal.TaskId,
+                taskFiles, new StandaloneSafetyResult(taskFiles > 0, []), candidate.Journal.TargetMode);
+            return new VerifiedCompletedStatus(WithVerificationScope(status, currentInventory.TotalFiles, verifiedFiles,
+                taskFiles > 0, verifiedFiles == currentInventory.TotalFiles ? "verified-original-targets" : "incomplete"), leases);
+        }
+        catch
+        {
+            for (int index = leases.Count - 1; index >= 0; index--)
+                await leases[index].DisposeAsync();
+            throw;
+        }
     }
 
-    private static object RebuildCompletedStatus(
+    private static async Task<FinalPublishedObjectLease> AcquireCompletedTaskLeaseAsync(
         StandaloneConfiguration configuration,
         string sourceRoot,
         Guid cardInstanceId,
         FaultDomainInfo sourceDomain,
         FaultDomainResolver faultDomains,
-        StandaloneCompletedTaskCandidate candidate)
+        StandaloneCompletedTaskCandidate candidate,
+        CancellationToken cancellationToken,
+        IReadOnlySet<string>? includedRelativePaths = null,
+        CompletedTaskSourceRebindingAuthorization? sourceRebindingAuthorization = null)
     {
         StandaloneTaskJournal journal = candidate.Journal;
-        if (journal.TargetMode != configuration.TargetMode)
-            throw new IOException("最近完成任务的保存方式与当前配置不一致。");
-
         string localRoot = string.Empty;
         string nasRoot = string.Empty;
         FaultDomainInfo? localDomain = null;
@@ -3747,7 +3784,6 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         if (journal.TargetMode.RequiresLocal())
         {
             localRoot = Path.GetFullPath(journal.LocalTargetRoot);
-            EnsureConfiguredLocalTargetContains(configuration.LocalTargetPath, localRoot);
             if (!Directory.Exists(localRoot))
                 throw new IOException("最近完成任务的本地保存位置当前不可用。");
             localDomain = faultDomains.ResolveLocalDomain(localRoot);
@@ -3756,7 +3792,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         {
             secondaryTarget = ResolveSecondaryTarget(
                 faultDomains,
-                configuration.NasMappedTargetPath,
+                journal.NasTargetRoot,
                 journal.NasTargetRoot,
                 isResume: true);
             nasRoot = secondaryTarget.CopyRoot;
@@ -3784,33 +3820,21 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             secondaryTarget?.Domain.StorageIdentity ?? string.Empty,
             journal.TargetMode,
             journal.InventoryManifestHash);
-        return RestoreCompletedStatus(candidate, current, localRoot, nasRoot);
+        return await RestoreCompletedStatusAsync(candidate, current, localRoot, nasRoot,
+            sourceRoot, cancellationToken, includedRelativePaths, sourceRebindingAuthorization);
     }
 
-    private static object RestoreCompletedStatus(
+    private static Task<FinalPublishedObjectLease> RestoreCompletedStatusAsync(
         StandaloneCompletedTaskCandidate candidate,
         RecoveryIdentitySnapshot current,
         string currentLocalTargetRoot,
-        string currentNasTargetRoot)
-    {
-        CompletedTaskReuseEligibility eligibility = CompletedTaskReuseGuard.EvaluatePersisted(
-            candidate.Journal,
-            candidate.Receipt,
-            current,
-            currentLocalTargetRoot,
-            currentNasTargetRoot);
-        if (!eligibility.CanReuse)
-        {
-            throw new IOException(
-                "最近完成任务的持久化证据不再一致：" + string.Join(", ", eligibility.Reasons));
-        }
-
-        return CompleteStatusFromPersisted(
-            candidate.Journal.TaskId,
-            candidate.Journal.Files.Count,
-            new StandaloneSafetyResult(true, []),
-            candidate.Journal.TargetMode);
-    }
+        string currentNasTargetRoot,
+        string sourceRoot,
+        CancellationToken cancellationToken,
+        IReadOnlySet<string>? includedRelativePaths = null,
+        CompletedTaskSourceRebindingAuthorization? sourceRebindingAuthorization = null) =>
+        CompletedTaskEvidenceVerifier.AcquireVerifiedLeaseAsync(sourceRoot, candidate, current,
+            currentLocalTargetRoot, currentNasTargetRoot, cancellationToken, includedRelativePaths, sourceRebindingAuthorization);
 
     private async Task<StandaloneSafetyResult> PersistCompletionAsync(
         TaskManifest manifest,
@@ -4680,19 +4704,32 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         Guid taskId,
         int totalFiles,
         StandaloneSafetyResult safety,
-        StandaloneTargetMode targetMode) => new
+        StandaloneTargetMode targetMode,
+        int currentInventoryFiles = 0,
+        int verifiedCurrentFiles = 0,
+        string historicalVerification = "not-revalidated") => new
         {
             view = "complete",
             configured = true,
             targetMode = TargetModeKey(targetMode),
             phase = "complete",
-            headline = "可以安全拔卡",
-            description = targetMode == StandaloneTargetMode.LocalAndNas
-            ? "两个保存目标都已完成发布和完整校验。"
-            : "所选保存目标已完成发布和完整校验。",
+            headline = IsWholeInventoryVerified(safety, currentInventoryFiles, verifiedCurrentFiles)
+                ? "当前素材已完整复核" : "本次任务已完成校验",
+            description = IsWholeInventoryVerified(safety, currentInventoryFiles, verifiedCurrentFiles)
+                ? "当前批准素材已按各任务原保存要求完整复核；更换目标不会自动回填历史素材。"
+                : "本次任务的所选目标已完成校验；历史素材尚无完整的当前验证证据，不能据此清理整卡。",
             taskId,
             taskLabel = $"任务 {taskId:N}",
-            safeToRemoveCard = safety.SafeToRemoveCard,
+            safeToRemoveCard = IsWholeInventoryVerified(safety, currentInventoryFiles, verifiedCurrentFiles),
+            safeToClear = IsWholeInventoryVerified(safety, currentInventoryFiles, verifiedCurrentFiles),
+            canEject = true,
+            taskVerified = safety.SafeToRemoveCard,
+            verificationScope = IsWholeInventoryVerified(safety, currentInventoryFiles, verifiedCurrentFiles)
+                ? "current-inventory" : "task",
+            currentInventoryFiles,
+            verifiedCurrentFiles,
+            historicalVerification,
+            verifiedAtUtc = DateTimeOffset.UtcNow,
             overallPercent = 100,
             currentFile = string.Empty,
             currentBytesPerSecond = 0,
@@ -4701,9 +4738,36 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             completedFiles = totalFiles,
             totalFiles,
             completionReceiptLabel = "本次完成记录已安全保存到本机",
-            safety = ToSafetyPayload(safety, totalFiles, 0, targetMode),
+            safety = IsWholeInventoryVerified(safety, currentInventoryFiles, verifiedCurrentFiles)
+                ? ToSafetyPayload(safety, totalFiles, 0, targetMode) : PendingSafety(),
+            taskSafety = ToSafetyPayload(safety, totalFiles, 0, targetMode),
             targets = CompleteTargets(targetMode),
         };
+
+    private static bool IsWholeInventoryVerified(StandaloneSafetyResult taskSafety, int included, int verified) =>
+        taskSafety.SafeToRemoveCard && included > 0 && verified == included;
+
+    private static bool HasCurrentInventoryProof(object status)
+    {
+        JsonElement value = JsonSerializer.SerializeToElement(status);
+        return value.TryGetProperty("safeToClear", out JsonElement safe) && safe.ValueKind == JsonValueKind.True &&
+            value.TryGetProperty("verificationScope", out JsonElement scope) && scope.GetString() == "current-inventory";
+    }
+
+    private static object WithVerificationScope(object status, int included, int verified,
+        bool taskVerified, string historicalVerification)
+    {
+        JsonElement value = JsonSerializer.SerializeToElement(status);
+        StandaloneTargetMode mode = value.GetProperty("targetMode").GetString() switch
+        {
+            "local-only" => StandaloneTargetMode.LocalOnly,
+            "nas-only" => StandaloneTargetMode.NasOnly,
+            _ => StandaloneTargetMode.LocalAndNas,
+        };
+        return CompleteStatusFromPersisted(value.GetProperty("taskId").GetGuid(),
+            value.GetProperty("totalFiles").GetInt32(), new StandaloneSafetyResult(taskVerified, []),
+            mode, included, verified, historicalVerification);
+    }
 
     private static string TargetModeKey(StandaloneTargetMode targetMode) => targetMode switch
     {
@@ -4895,21 +4959,21 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         return false;
     }
 
-    private static object SoftwareInitializationStatus(string templateName, int fileCount, string description) => new
+    private bool TryGetMountedConfirmedCardInstanceId(string volumeKey, out Guid cardInstanceId)
     {
-        view = "waiting",
-        configured = true,
-        phase = "software-initialized",
-        headline = "这张卡已完成软件初始化",
-        description,
-        templateName,
-        registeredFileCount = fileCount,
-        safeToRemoveCard = false,
-        baselinePersisted = true,
-        softwareInitialized = true,
-        safety = PendingSafety(),
-        targets = Array.Empty<object>(),
-    };
+        lock (_gate)
+        {
+            if (_mediaStates.TryGetValue(volumeKey, out StandaloneMediaItemDto? media) &&
+                media.IdentityState is "known" or "known_card" or "auto_associate" &&
+                Guid.TryParse(media.CardInstanceId, out cardInstanceId) &&
+                cardInstanceId != Guid.Empty)
+            {
+                return true;
+            }
+        }
+        cardInstanceId = Guid.Empty;
+        return false;
+    }
 
     private static object BaselineReadyStatus(string headline, string description) => new
     {
@@ -4918,7 +4982,13 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         phase = "baseline-ready",
         headline,
         description,
-        safeToRemoveCard = true,
+        safeToRemoveCard = false,
+        safeToClear = false,
+        canEject = true,
+        taskVerified = false,
+        verificationScope = "none",
+        historicalVerification = "not-revalidated",
+        safety = PendingSafety(),
         baselinePersisted = true,
         currentBytesPerSecond = 0,
         averageBytesPerSecond = 0,
@@ -5008,7 +5078,9 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
     {
         string? view = status.GetType().GetProperty("view")?.GetValue(status) as string;
         if (string.Equals(view, "complete", StringComparison.Ordinal))
-            return "已从持久化证据恢复安全完成状态。";
+            return HasCurrentInventoryProof(status)
+                ? "当前批准素材已按各任务原目标完成实物复核。"
+                : "本次任务已校验；历史素材未全部复核，不能据此清理整卡。";
         if (string.Equals(view, "baseline", StringComparison.Ordinal))
         {
             return status.GetType().GetProperty("headline")?.GetValue(status) as string ?? fallback;
@@ -5074,6 +5146,33 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         }
         StatusChanged?.Invoke(this, payload);
         RaiseMediaStatusChanged();
+    }
+
+    private bool CommitVerifiedCompletion(
+        Guid operationId,
+        VolumeEventArgs volume,
+        VerifiedCompletedStatus evidence,
+        CancellationToken cancellationToken)
+    {
+        object status = evidence.Status;
+        lock (_gate)
+        {
+            if (_activeOperationId != operationId ||
+                !string.Equals(_activeVolumeKey, VolumeKey(volume), StringComparison.OrdinalIgnoreCase))
+                return false;
+            evidence.Commit(verifiedStatus =>
+            {
+                if (HasCurrentInventoryProof(verifiedStatus))
+                    RememberSafeCompletionNoLock(volume);
+                _activeOperationId = null;
+                _transferStatus.Stop();
+                _status = verifiedStatus;
+                ApplyMainStatusToActiveMediaNoLock(verifiedStatus);
+            }, cancellationToken);
+        }
+        StatusChanged?.Invoke(this, status);
+        RaiseMediaStatusChanged();
+        return true;
     }
 
     private void SetOperationTerminalStatus(Guid operationId, object status)
@@ -5288,20 +5387,20 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             {
                 WorkState = "completed",
                 QueuePosition = null,
-                SafetyConclusion = "approved_material_verified",
-                ReasonCode = "APPROVED_MATERIAL_VERIFIED",
+                SafetyConclusion = HasCurrentInventoryProof(status) ? "approved_material_verified" : "task_verified",
+                ReasonCode = HasCurrentInventoryProof(status) ? "APPROVED_MATERIAL_VERIFIED" : "TASK_ONLY_VERIFIED",
                 PrimaryAction = "configure_card_scope",
                 AvailableActions = ["configure_card_scope"],
                 OverallPercent = 100,
-                Detail = "本卡已纳入素材范围的文件已完成复制与完整校验，可以拔卡。",
+                Detail = HasCurrentInventoryProof(status)
+                    ? "当前批准素材已按各任务原保存要求完整复核。"
+                    : "本次任务已校验；历史素材未全部重新验证，不能据此清理整卡。",
             },
             "baseline" => current with
             {
                 WorkState = "completed",
                 QueuePosition = null,
-                SafetyConclusion = headline.Contains("空素材卡", StringComparison.Ordinal)
-                    ? "no_backup_conclusion"
-                    : "approved_material_verified",
+                SafetyConclusion = "no_backup_conclusion",
                 ReasonCode = headline.Contains("空素材卡", StringComparison.Ordinal)
                     ? "EMPTY_CARD_INITIALIZED"
                     : "CARD_BASELINE_RECONCILED",
@@ -5494,8 +5593,16 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
             "保存目标存在无法安全处理的同名对象。系统没有覆盖现有文件；请检查命名规则和保存位置后重新检查。",
         _ when string.Equals(guidance?.ErrorCategory, "nas_unavailable", StringComparison.Ordinal) =>
             "NAS 保存目标在任务中断开或不可访问。请恢复 NAS、映射盘和权限后重新检查；系统没有跳过 NAS。",
+        InvalidDataException or IOException when ContainsChineseText(exception.Message) => exception.Message,
         _ => "任务未能安全完成。系统已停止并保留恢复证据；请保持当前连接并重新检查。",
     };
+
+    private static bool ContainsChineseText(string value) =>
+        value.Length <= 320 &&
+        !value.Contains("\\?\\", StringComparison.Ordinal) &&
+        !value.Contains("Volume{", StringComparison.OrdinalIgnoreCase) &&
+        !value.Contains(":\\", StringComparison.Ordinal) &&
+        value.Any(character => character is >= '\u3400' and <= '\u9fff');
 
     private static string TargetRoleLabel(string targetRole) =>
         string.Equals(targetRole, "nas", StringComparison.Ordinal) ? "NAS 保存目标" : "本地保存目标";
@@ -5520,7 +5627,7 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
                 VolumeKey(_lastArrivedVolume), volumeKey, StringComparison.OrdinalIgnoreCase);
         if (!mounted || !Directory.Exists(Path.GetFullPath(volume.DriveLetter)))
         {
-            EndStateRepair(currentVolumeResolved: true);
+            EndStateRepair();
             return null;
         }
 
@@ -5534,14 +5641,15 @@ public sealed class StandaloneRuntimeService : IHostedService, IAsyncDisposable
         }
     }
 
-    private void EndStateRepair(bool currentVolumeResolved)
+    private void EndStateRepair()
     {
         bool startPending;
         lock (_gate)
         {
             _stateRepairInProgress = false;
-            if (currentVolumeResolved)
-                _currentVolumeBlocked = false;
+            // A failed repair remains visible on that card, but it must never hold the
+            // global single-worker queue hostage. The user can retry it independently.
+            _currentVolumeBlocked = false;
             startPending = !_stopping &&
                 !_configurationChangeInProgress &&
                 _activeTask is not { IsCompleted: false } &&

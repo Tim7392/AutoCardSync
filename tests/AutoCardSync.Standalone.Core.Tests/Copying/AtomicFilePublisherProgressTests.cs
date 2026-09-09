@@ -42,6 +42,36 @@ public sealed class AtomicFilePublisherProgressTests : IDisposable
         Assert.False(File.Exists(temporaryPath));
     }
 
+    [Fact]
+    public async Task Temporary_hash_mismatch_is_retried_twice_before_failure()
+    {
+        Directory.CreateDirectory(_root);
+        string temporaryPath = Path.Combine(_root, "mismatch.partial");
+        string finalPath = Path.Combine(_root, "mismatch.bin");
+        await WritePayloadAsync(temporaryPath);
+        string actualHash = await ComputeSha256Async(temporaryPath);
+        string differentHash = actualHash[0] == '0'
+            ? "1" + actualHash[1..]
+            : "0" + actualHash[1..];
+        var progress = new List<FileVerificationProgress>();
+
+        await using PublishResult published = await new AtomicFilePublisher().PublishAsync(
+            temporaryPath,
+            finalPath,
+            differentHash,
+            PayloadBytes,
+            CancellationToken.None,
+            allowVerifiedExisting: false,
+            temporaryVerificationProgress: new InlineProgress<FileVerificationProgress>(progress.Add));
+
+        Assert.False(published.Success);
+        Assert.NotNull(published.Error);
+        Assert.Contains("after 3 verification attempts", published.Error, StringComparison.Ordinal);
+        Assert.Equal(3, progress.Count(value => value.BytesVerified == 0));
+        Assert.True(File.Exists(temporaryPath));
+        Assert.False(File.Exists(finalPath));
+    }
+
     private static void AssertProgress(IReadOnlyList<FileVerificationProgress> values)
     {
         Assert.NotEmpty(values);

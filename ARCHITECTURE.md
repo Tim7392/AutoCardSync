@@ -2,7 +2,7 @@
 
 ## Purpose and scope
 
-AutoCardSync Standalone V1 is a Windows desktop workflow for copying selected media from a removable card to one or two selected destinations. It is designed to make the safety decision about the **current card instance** from persisted evidence, rather than from a progress indicator or a previous card's state.
+AutoCardSync Standalone V1 is a Windows desktop workflow for copying selected media from a removable card to one or two selected destinations. Its safety decision binds the **current card instance** and currently approved inventory to freshly verified source and target objects. Persisted evidence identifies the original backup requirements and objects to check.
 
 This document describes the Standalone product only. It covers the desktop host, the Standalone Core transfer and recovery rules, the removable source card, and the selected local and NAS destinations. It does not describe a remote control plane, a central database, or any external service as part of the safety decision.
 
@@ -10,7 +10,7 @@ The implementation intentionally separates three questions:
 
 1. Which files belong to this card and this selection?
 2. Have the selected target copies been durably created and independently verified?
-3. Is there enough persisted evidence to say that this exact card may be removed safely?
+3. Does fresh verification cover every currently approved file and all of its original required copies?
 
 The answer to the third question is fail-closed. A partially complete transfer, missing receipt, changed identity, or unavailable required target is never presented as safe completion.
 
@@ -43,6 +43,17 @@ flowchart LR
 | Persistent state | Stores card baseline, task journal, and completion receipt. | State is input to recovery and safety validation, not a substitute for current identity checks. |
 
 `StandaloneTargetMode` determines whether the selected task requires the local target, the NAS target, or both. A target is required only when selected, but every selected target is required for that task's safety decision. When two targets are selected, they must resolve to independent fault domains; a shared volume, alias, nested path, or equivalent destination is rejected before copying starts.
+
+## Card lifecycle and destination mapping
+
+Standalone separates card registration from media transfer:
+
+1. **Recognize:** the mounted card is assigned a card instance and its current source identity is inspected.
+2. **Initialize in software:** `card.initialize` establishes an empty import boundary and never formats or writes to the card. Empty selections produce `no_backup_conclusion`; selected media already present on a nonempty card enters the normal transfer and verification flow.
+3. **Configure the card profile:** `card.profile.configure` changes only the selected card's source-folder and media-type policy. Global target settings and other card profiles remain intact.
+4. **Import incrementally:** a fresh task compares the current inventory with the last successful baseline and includes only new or identity/content-changed media.
+
+For a new task, the target folder is shared between selected local and NAS roots and is named `卡名 M.d-HH：mm`. The journal keeps the source `RelativePath` for identity continuity and auditability, but schema-v3 `DestinationRelativePath` is a validated single file name used by temporary objects, publication, recovery, and final verification. Stable collision suffixes prevent same-name media from overwriting one another. A legacy schema-v2 journal continues to resolve its historical source-relative destination path so upgrading does not move or reinterpret an unfinished task.
 
 ## Safety invariants
 
@@ -103,6 +114,12 @@ flowchart TD
 Recovery is not permitted when the source identity, card instance identifier, target mode, inventory manifest, content manifest, or a required target identity differs from the journal. A recovery rejection preserves the evidence for diagnosis but does not mark the card safe or silently continue from an unrelated card.
 
 ## Persistent evidence
+
+Completed-task restoration is asynchronous and serialized with active card work. The receipt and journal are validated as lookup evidence, then each included current source and original required target is opened read-only, checked for object identity and length, and fully hashed. Leases remain alive through the synchronous status publication, with a final continuity check immediately before publication. Cancellation or missing current proof cannot publish a safe completion.
+
+The inventory evidence planner combines matching files from historical tasks belonging to the recognized card. Each task retains its original target mode and roots. Explicit card reassociation changes the current binding; it does not rewrite journal or receipt identities or manufacture verification. Historical verification across the authorized binding still requires current file identity and full content checks.
+
+Status carries `verificationScope`, `taskVerified`, current inventory and verified-file counts, and historical verification validity. `task` scope cannot set whole-card `safeToClear`. Only positive, complete `current-inventory` coverage can do so. Unchanged metadata, empty selections, registration, and reassociation remain observations. Changing destinations does not backfill historical files; an explicit fresh restart is a separate user action.
 
 | Artifact | Purpose | What it must not be used for |
 | --- | --- | --- |

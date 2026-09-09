@@ -463,7 +463,8 @@ public sealed class StandaloneInventoryBaselineStore
         CardIdentityEvidence initializationEvidence,
         bool abandonOtherPending,
         CancellationToken cancellationToken,
-        bool archiveExistingCommittedBaseline = false)
+        bool archiveExistingCommittedBaseline = false,
+        IReadOnlyCollection<Guid>? supersededCardInstanceIds = null)
     {
         if (cardInstanceId == Guid.Empty)
             throw new ArgumentException("Card instance identity is required.", nameof(cardInstanceId));
@@ -492,20 +493,25 @@ public sealed class StandaloneInventoryBaselineStore
                 InitializationPending = true,
                 InitializationEvidence = initializationEvidence,
             };
+            var resetCardIds = new HashSet<Guid>(supersededCardInstanceIds ?? []);
+            resetCardIds.Add(cardInstanceId);
             StandaloneInventoryBaseline[] abandoned = abandonOtherPending
                 ? document.Baselines
-                    .Where(value => value.InitializationPending && value.CardInstanceId != cardInstanceId)
+                    .Where(value => value.InitializationPending &&
+                        (resetCardIds.Contains(value.CardInstanceId) || value.CardInstanceId != cardInstanceId))
                     .ToArray()
-                : [];
+                : document.Baselines
+                    .Where(value => value.InitializationPending && resetCardIds.Contains(value.CardInstanceId))
+                    .ToArray();
             StandaloneInventoryBaseline[] archivedCommitted = archiveExistingCommittedBaseline
                 ? document.Baselines
-                    .Where(value => !value.InitializationPending && value.CardInstanceId == cardInstanceId)
+                    .Where(value => !value.InitializationPending && resetCardIds.Contains(value.CardInstanceId))
                     .ToArray()
                 : [];
             StandaloneInventoryBaselineDocument updated = document with
             {
                 Baselines = document.Baselines
-                    .Where(value => value.CardInstanceId != cardInstanceId &&
+                    .Where(value => !resetCardIds.Contains(value.CardInstanceId) &&
                         (!abandonOtherPending || !value.InitializationPending))
                     .Append(pending)
                     .ToArray(),

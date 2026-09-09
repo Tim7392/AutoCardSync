@@ -1,4 +1,4 @@
-﻿namespace AutoCardSync.Standalone.Core.Tests.UI;
+namespace AutoCardSync.Standalone.Core.Tests.UI;
 
 public sealed class StandaloneWebUiRegressionTests
 {
@@ -75,7 +75,9 @@ public sealed class StandaloneWebUiRegressionTests
         Assert.Contains("已记录当前素材清单，今后仅同步新增素材", html, StringComparison.Ordinal);
         Assert.Contains("payload.phase !== 'baseline-ready'", renderBaseline, StringComparison.Ordinal);
         Assert.Contains("payload.baselinePersisted !== true", renderBaseline, StringComparison.Ordinal);
-        Assert.Contains("payload.safeToRemoveCard !== true", renderBaseline, StringComparison.Ordinal);
+        Assert.Contains("payload.safeToRemoveCard !== false", renderBaseline, StringComparison.Ordinal);
+        Assert.Contains("payload.safeToClear !== false", renderBaseline, StringComparison.Ordinal);
+        Assert.Contains("payload.verificationScope !== 'none'", renderBaseline, StringComparison.Ordinal);
         Assert.Contains("payload.targets.length !== 0", renderBaseline, StringComparison.Ordinal);
         Assert.DoesNotContain("renderTarget(", renderBaseline, StringComparison.Ordinal);
         Assert.DoesNotContain("completeLocal", renderBaseline, StringComparison.Ordinal);
@@ -154,7 +156,7 @@ public sealed class StandaloneWebUiRegressionTests
     }
 
     [Fact]
-    public void Failure_screen_exposes_confirmed_fresh_restart_only_for_recoverable_old_tasks()
+    public void Failure_screen_exposes_sheet_confirmed_fresh_restart_only_for_recoverable_old_tasks()
     {
         string html = ReadWebUi("index.html");
         string script = ReadWebUi("scripts", "app.js");
@@ -164,8 +166,9 @@ public sealed class StandaloneWebUiRegressionTests
         Assert.Contains("'task.restartFresh'", script, StringComparison.Ordinal);
         Assert.Contains("failure.canRestartFresh", script, StringComparison.Ordinal);
         Assert.Contains("restartFreshBtn').hidden = canRestartFresh !== true", script, StringComparison.Ordinal);
-        Assert.Contains("window.confirm", script, StringComparison.Ordinal);
-        Assert.Contains("postCommand('task.restartFresh', { confirmed: true })", script, StringComparison.Ordinal);
+        Assert.Contains("requestCardDecision({", script, StringComparison.Ordinal);
+        Assert.Contains("command: 'task.restartFresh'", script, StringComparison.Ordinal);
+        Assert.Contains("payload: { ...target, confirmed: true }", script, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -179,8 +182,10 @@ public sealed class StandaloneWebUiRegressionTests
         Assert.Contains("'card.reinitialize'", script, StringComparison.Ordinal);
         Assert.Contains("failure.canReinitializeCard", script, StringComparison.Ordinal);
         Assert.Contains("reinitializeCardBtn').hidden = canReinitializeCard !== true", script, StringComparison.Ordinal);
-        Assert.Contains("不会读取素材内容、不会写入保存目标，也不会删除旧任务或回执", script, StringComparison.Ordinal);
-        Assert.Contains("postCommand('card.reinitialize', { confirmed: true })", script, StringComparison.Ordinal);
+        Assert.Contains("旧任务、回执和历史基线会保留", script, StringComparison.Ordinal);
+        Assert.Contains("源卡不会被写入", script, StringComparison.Ordinal);
+        Assert.Contains("command: 'card.reinitialize'", script, StringComparison.Ordinal);
+        Assert.Contains("payload: { ...target, confirmed: true }", script, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -190,24 +195,34 @@ public sealed class StandaloneWebUiRegressionTests
         string script = ReadWebUi("scripts", "app.js");
 
         Assert.Contains("id=\"reassociateCardBtn\"", html, StringComparison.Ordinal);
-        Assert.Contains("这是同一张卡，继续检查新增", html, StringComparison.Ordinal);
+        Assert.Contains("这是同一张卡，继续使用", html, StringComparison.Ordinal);
         Assert.Contains("failure.canReassociateCard", script, StringComparison.Ordinal);
         Assert.Contains("reassociateCardBtn').hidden = canReassociateCard !== true", script, StringComparison.Ordinal);
-        Assert.Contains("postCommand('card.reassociate', { confirmed: true })", script, StringComparison.Ordinal);
-        Assert.Contains("不会把当前内容直接吞进新基线", script, StringComparison.Ordinal);
+        Assert.Contains("command: 'card.reassociate'", script, StringComparison.Ordinal);
+        Assert.Contains("payload: { ...target, confirmed: true }", script, StringComparison.Ordinal);
+        Assert.Contains("不会把当前内容直接算作已导入", script, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Bridge_requests_timeout_and_restore_the_setup_submit_button()
+    public void Sensitive_bridge_timeout_unlocks_submit_and_refreshes_authoritative_state()
     {
         string script = ReadWebUi("scripts", "app.js");
+        string expire = Between(script, "  function expireRequest", "  function postCommand");
+        string response = Between(script, "  function handleResponse", "  function receiveNativeMessage");
 
         Assert.Contains("const REQUEST_TIMEOUT_MS = 30000", script, StringComparison.Ordinal);
         Assert.Contains("window.setTimeout(() => expireRequest(requestKey), REQUEST_TIMEOUT_MS)", script, StringComparison.Ordinal);
         Assert.Contains("pendingRequests.delete(requestId)", script, StringComparison.Ordinal);
         Assert.Contains("window.clearTimeout(pending.timeoutId)", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("pending.timedOut = true", script, StringComparison.Ordinal);
         Assert.Contains("setupSubmitBtn').disabled = false", script, StringComparison.Ordinal);
-        Assert.Contains("无法确认设置已保存；可以安全重试", script, StringComparison.Ordinal);
+        Assert.Contains("postCommand('configuration.get')", script, StringComparison.Ordinal);
+        Assert.Contains("postCommand('status.refresh')", script, StringComparison.Ordinal);
+        Assert.Contains("无需重启应用", script, StringComparison.Ordinal);
+        Assert.True(
+            expire.IndexOf("pendingRequests.delete(requestId)", StringComparison.Ordinal) <
+            expire.IndexOf("postCommand('configuration.get')", StringComparison.Ordinal));
+        Assert.Contains("if (!pending) return;", response, StringComparison.Ordinal);
     }
     [Fact]
     public void Corrupt_configuration_recovery_notice_is_visible_in_first_run_setup()
@@ -272,7 +287,7 @@ public sealed class StandaloneWebUiRegressionTests
         DirectoryInfo? current = new(AppContext.BaseDirectory);
         while (current is not null)
         {
-            if (File.Exists(Path.Combine(current.FullName, "AutoCardSync.CSharp.slnf")))
+            if (File.Exists(Path.Combine(current.FullName, "AutoCardSync.Standalone.sln")))
                 return current.FullName;
             current = current.Parent;
         }

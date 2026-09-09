@@ -71,6 +71,7 @@ public sealed record StandaloneConfiguration
     public Guid DefaultCameraTemplateId { get; init; }
     public IReadOnlyList<StandaloneCameraTemplate> CameraTemplates { get; init; } = [];
     public IReadOnlyList<StandaloneCardProfile> CardProfiles { get; init; } = [];
+    public IReadOnlyList<StandaloneCardProfile> ArchivedCardProfiles { get; init; } = [];
 
     [JsonIgnore]
     public IReadOnlyList<string> NormalizedExtensions => ApprovedExtensions
@@ -124,6 +125,7 @@ public sealed record StandaloneConfiguration
             DefaultCameraTemplateId = defaultId,
             CameraTemplates = templates,
             CardProfiles = CardProfiles.ToArray(),
+            ArchivedCardProfiles = ArchivedCardProfiles.ToArray(),
         };
     }
 
@@ -149,7 +151,7 @@ public sealed record StandaloneConfiguration
 
         if (ApprovedSourceDirectories is null || ApprovedExtensions is null ||
             LocalTargetPath is null || NasMappedTargetPath is null ||
-            CameraTemplates is null || CardProfiles is null)
+            CameraTemplates is null || CardProfiles is null || ArchivedCardProfiles is null)
         {
             errors.Add(new("configuration_structure_invalid", "The configuration contains a missing required collection or path."));
             return new(errors.AsReadOnly());
@@ -191,6 +193,14 @@ public sealed record StandaloneConfiguration
             CardProfiles.Any(profile => templates.All(template => template.TemplateId != profile.CameraTemplateId)))
         {
             errors.Add(new("card_profile_invalid", "Card profiles must have unique card identities and reference an existing camera template."));
+        }
+        if (ArchivedCardProfiles.Any(profile =>
+                profile is null ||
+                profile.CardInstanceId == Guid.Empty ||
+                profile.CameraTemplateId == Guid.Empty ||
+                string.IsNullOrWhiteSpace(profile.DisplayName)))
+        {
+            errors.Add(new("archived_card_profile_invalid", "Archived card profiles contain an invalid record."));
         }
 
         string? localTarget = TargetMode.RequiresLocal()
