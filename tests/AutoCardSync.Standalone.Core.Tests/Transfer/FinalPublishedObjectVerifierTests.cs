@@ -175,7 +175,12 @@ public sealed class FinalPublishedObjectVerifierTests : IDisposable
             return;
 
         StandaloneTaskJournal journal = CreateJournal(fixture, content);
-        await Assert.ThrowsAsync<IOException>(() => AcquireAsync(fixture, journal));
+        InvalidDataException failure = await Assert.ThrowsAsync<InvalidDataException>(
+            () => AcquireAsync(fixture, journal));
+        PathViolationException violation = Assert.IsType<PathViolationException>(failure.InnerException);
+        Assert.Contains("reparse point", violation.Message, StringComparison.Ordinal);
+        Assert.Equal(content, await File.ReadAllBytesAsync(fixture.SourcePath));
+        Assert.Equal(content, await File.ReadAllBytesAsync(realLocal));
     }
 
     [Fact]
